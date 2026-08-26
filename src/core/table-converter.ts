@@ -28,7 +28,7 @@ function rawAdif(table: TableDocument): string {
     const value = row.cells[column.index] ?? "";
     return value ? `<${column.name}:${value.length}>${value}` : "";
   }).filter(Boolean).join(" ") + " <EOR>");
-  return `<ADIF_VER:5>3.1.6\n<PROGRAMID:27>AMATEUR-RADIO-LOG-WORKBENCH\n<EOH>\n${records.join("\n")}\n`;
+  return `<ADIF_VER:5>3.1.7\n<PROGRAMID:27>AMATEUR-RADIO-LOG-WORKBENCH\n<EOH>\n${records.join("\n")}\n`;
 }
 
 export function textTableToAdif(table: TableDocument, options: AdifExportOptions = {}): ConversionResult {

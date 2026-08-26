@@ -47,6 +47,7 @@ export function parseAdif(source: string): AdifDocument {
   }
   return {
     format: "adif",
+    container: "adi",
     source,
     header: headerSegment.tags,
     headerOriginal: source.slice(0, headerEnd),
@@ -66,7 +67,7 @@ function serializeTag(tag: AdifTag): string {
 
 export function serializeAdif(document: AdifDocument): string {
   if (!document.records.some((record) => record.dirty)) return document.source;
-  const header = document.headerOriginal || `<ADIF_VER:5>3.1.6${document.newline}<EOH>`;
+  const header = document.headerOriginal || `<ADIF_VER:5>3.1.7${document.newline}<EOH>`;
   const records = document.records.map((record) => {
     if (!record.dirty) return record.original;
     let output = record.original;

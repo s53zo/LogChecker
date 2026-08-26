@@ -93,12 +93,14 @@ export interface AdifRecord {
 
 export interface AdifDocument {
   format: "adif";
+  container: "adi" | "adx";
   source: string;
   header: AdifTag[];
   headerOriginal: string;
   records: AdifRecord[];
   newline: "\n" | "\r\n" | "\r";
   unparsedTail: string;
+  parseWarnings?: string[];
 }
 
 export interface EdiRecord {
@@ -147,6 +149,8 @@ export interface Diagnostic {
   lineId?: string;
   lineNumber?: number;
   field?: string;
+  category?: "syntax" | "conformance" | "destination" | "advisory";
+  suggestion?: string;
 }
 
 export interface RepairChange {

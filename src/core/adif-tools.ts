@@ -1,4 +1,5 @@
-import { adifValue, parseAdif } from "./adif";
+import { adifValue, parseAdif, updateAdifTag } from "./adif";
+import { DEPRECATED_MODE_MAP } from "./adif-schema";
 import { geography } from "./geography";
 import { bandFromFrequency } from "./radio";
 import type { AdifDocument, AdifRecord, AdifTag } from "./types";
@@ -37,13 +38,13 @@ function recordKey(record: AdifRecord): string {
 
 function rebuild(document: AdifDocument, records: readonly AdifRecord[], unparsedTail = document.unparsedTail): AdifDocument {
   const newline = document.newline;
-  const header = document.headerOriginal || `<ADIF_VER:5>3.1.6${newline}<EOH>`;
+  const header = document.headerOriginal || `<ADIF_VER:5>3.1.7${newline}<EOH>`;
   const recordSource = records.map((record) => record.original.trim() || `${record.tags.map((tag) => `<${tag.name}:${tag.value.length}${tag.type ? `:${tag.type}` : ""}>${tag.value}`).join(" ")} <EOR>`);
   return parseAdif(`${header}${recordSource.length ? newline : ""}${recordSource.join(newline)}${recordSource.length ? newline : ""}${unparsedTail}`);
 }
 
 export function mergeAdif(documents: readonly AdifDocument[], strategy: DuplicateStrategy = "keep-first"): AdifMergeResult {
-  if (!documents.length) return { document: parseAdif("<ADIF_VER:5>3.1.6\n<EOH>\n"), duplicates: [] };
+  if (!documents.length) return { document: parseAdif("<ADIF_VER:5>3.1.7\n<EOH>\n"), duplicates: [] };
   const records: AdifRecord[] = [];
   const positions = new Map<string, number>();
   const duplicates: AdifMergeResult["duplicates"] = [];
@@ -115,12 +116,18 @@ function exportedTag(tag: AdifTag, options: AdifExportOptions): string {
 export function serializeAdifWithOptions(document: AdifDocument, options: AdifExportOptions = {}): string {
   const newline = options.newline ?? document.newline;
   const header = document.header.length
-    ? `${document.header.map((tag) => exportedTag(tag, options)).join(" ")}${newline}<${options.tagCase === "lower" ? "eoh" : "EOH"}>`
-    : `<${options.tagCase === "lower" ? "adif_ver" : "ADIF_VER"}:5${options.includeTypes ? ":S" : ""}>3.1.6${newline}<${options.tagCase === "lower" ? "eoh" : "EOH"}>`;
+    ? `${(document.header.some((tag) => tag.name === "ADIF_VER") ? document.header.map((tag) => tag.name === "ADIF_VER" ? { ...tag, value: "3.1.7" } : tag) : [{ name: "ADIF_VER", value: "3.1.7", raw: "" }, ...document.header]).map((tag) => exportedTag(tag, options)).join(" ")}${newline}<${options.tagCase === "lower" ? "eoh" : "EOH"}>`
+    : `<${options.tagCase === "lower" ? "adif_ver" : "ADIF_VER"}:5${options.includeTypes ? ":S" : ""}>3.1.7${newline}<${options.tagCase === "lower" ? "eoh" : "EOH"}>`;
   const eor = `<${options.tagCase === "lower" ? "eor" : "EOR"}>`;
   return `${header}${document.records.length ? newline : ""}${document.records.map((record) => `${record.tags.map((tag) => exportedTag(tag, options)).join(" ")} ${eor}`).join(newline)}${document.records.length ? newline : ""}`;
 }
 
 export function extractAdifCallsigns(document: AdifDocument): string[] {
   return [...new Set(document.records.map((record) => adifValue(record, "CALL").trim().toUpperCase()).filter(Boolean))].sort();
+}
+
+export function modernizeDeprecatedModes(document: AdifDocument): { document: AdifDocument; changes: Array<{ recordId: string; before: string; after: string }> } {
+  let next = document; const changes: Array<{ recordId: string; before: string; after: string }> = [];
+  for (const record of document.records) { const before = adifValue(record, "MODE").toUpperCase(); const mapping = DEPRECATED_MODE_MAP[before]; if (!mapping) continue; next = updateAdifTag(next, record.id, "MODE", mapping.mode); if (mapping.submode && !adifValue(record, "SUBMODE")) next = updateAdifTag(next, record.id, "SUBMODE", mapping.submode); changes.push({ recordId: record.id, before, after: `${mapping.mode}${mapping.submode ? ` / ${mapping.submode}` : ""}` }); }
+  return { document: next, changes };
 }

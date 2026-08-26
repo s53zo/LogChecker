@@ -149,6 +149,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .diagnostic strong { display: block; margin-bottom: .15rem; font-size: .78rem; }
 .diagnostic span { color: var(--ink-soft); font-size: .72rem; line-height: 1.4; }
 .diagnostic code { color: #7c8892; font-size: .65rem; }
+.support-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: .25rem .55rem; color: var(--ink-soft); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+.duplicate-list { display: grid; gap: 1rem; }
+.card hr { border: 0; border-top: 1px solid var(--line); margin: 1.25rem 0; }
 .status-banner { display: flex; align-items: flex-start; gap: .75rem; padding: .85rem 1rem; border: 1px solid; border-radius: .6rem; font-size: .78rem; line-height: 1.5; }
 .status-banner.success { color: #17614f; border-color: #a8d5c9; background: #eef9f5; }
 .status-banner.warning { color: #76510b; border-color: #ead195; background: #fff9e9; }

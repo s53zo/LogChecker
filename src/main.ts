@@ -1,11 +1,17 @@
 import "./styles.css";
 import { countBucket, trackEvent } from "./core/analytics";
 import { adifValue, parseAdif, serializeAdif, updateAdifTag } from "./core/adif";
+import { parseAdx, serializeAdx } from "./core/adx";
+import { PREFLIGHT_PROFILES, preflightReportHtml, preflightSubset, runPreflight, type PreflightProfileId, type PreflightResult } from "./core/preflight";
+import { applyStationProfile, parseProfileStore, safeProfileFilename, splitAdif, validateStationProfile, type SplitCriterion, type StationProfile } from "./core/station-profiles";
+import { duplicateReportCsv, findDuplicateCandidates, resolveDuplicate, type DuplicateCandidate } from "./core/duplicates";
+import { fastEntryToAdif, parseFastEntry, type FastEntryResult } from "./core/fast-entry";
 import {
   extractAdifCallsigns,
   filterAdif,
   filterAdifRecords,
   mergeAdif,
+  modernizeDeprecatedModes,
   serializeAdifWithOptions,
   type AdifExportOptions,
   type AdifMergeResult,
@@ -85,7 +91,7 @@ import type {
 } from "./core/types";
 import { validateAdif, validateCabrillo, validateEdi } from "./core/validator";
 
-type View = "open" | "header" | "qsos" | "problems" | "repair" | "search" | "convert" | "score" | "statistics" | "export";
+type View = "open" | "header" | "qsos" | "problems" | "preflight" | "duplicates" | "repair" | "search" | "convert" | "score" | "statistics" | "export";
 type ReferenceDataStatus = "bundled" | "idle" | "loading" | "online" | "local" | "error";
 
 interface AppState {
@@ -103,7 +109,15 @@ interface AppState {
   ediScoreFormula: EdiScoreFormula | "auto";
   ruleId: string;
   paperOpen: boolean;
-  conversion: { type: "adif" | "cabrillo" | "edi" | "csv"; result: ConversionResult } | null;
+  conversion: { type: "adif" | "adx" | "cabrillo" | "edi" | "csv"; result: ConversionResult } | null;
+  preflightProfile: PreflightProfileId;
+  preflight: PreflightResult | null;
+  stationProfiles: StationProfile[];
+  activeProfileId: string;
+  duplicateTolerance: number;
+  duplicates: DuplicateCandidate[];
+  fastEntrySource: string;
+  fastEntry: FastEntryResult | null;
   stationCall: string;
   conversionContest: string;
   callbookName: string;
@@ -165,6 +179,8 @@ const views: Array<{ id: View; label: string }> = [
   { id: "header", label: "Log details" },
   { id: "qsos", label: "Contacts" },
   { id: "problems", label: "Problems" },
+  { id: "preflight", label: "Preflight" },
+  { id: "duplicates", label: "Duplicates" },
   { id: "repair", label: "Repair" },
   { id: "search", label: "Search" },
   { id: "convert", label: "Convert" },
@@ -191,6 +207,14 @@ const state: AppState = {
   ruleId: "generic-prefix",
   paperOpen: false,
   conversion: null,
+  preflightProfile: "generic",
+  preflight: null,
+  stationProfiles: (() => { try { return (JSON.parse(localStorage.getItem("log-workbench:station-profiles:v1") ?? "{\"version\":1,\"profiles\":[]}") as { profiles?: StationProfile[] }).profiles ?? []; } catch { return []; } })(),
+  activeProfileId: "",
+  duplicateTolerance: 5,
+  duplicates: [],
+  fastEntrySource: localStorage.getItem("log-workbench:fast-entry-draft:v1") ?? "",
+  fastEntry: null,
   stationCall: "",
   conversionContest: "GENERIC-CONTEST",
   callbookName: "",
@@ -320,7 +344,7 @@ const escapeHtml = (input: unknown): string => String(input ?? "")
 
 function sourceOf(documentValue: LogDocument): string {
   if (documentValue.format === "cabrillo") return serializeCabrillo(documentValue);
-  if (documentValue.format === "adif") return serializeAdif(documentValue);
+  if (documentValue.format === "adif") return documentValue.container === "adx" ? serializeAdx(documentValue) : serializeAdif(documentValue);
   if (documentValue.format === "edi") return serializeEdi(documentValue);
   return documentValue.source;
 }
@@ -328,7 +352,7 @@ function sourceOf(documentValue: LogDocument): string {
 function parseSource(source: string, fileName = state.fileName): LogDocument {
   const format = detectFormat(source, fileName);
   if (format === "cabrillo") return parseCabrillo(source);
-  if (format === "adif") return parseAdif(source);
+  if (format === "adif") return /<(?:[\w.-]+:)?ADX\b/i.test(source) || fileName.toLowerCase().endsWith(".adx") ? parseAdx(source) : parseAdif(source);
   if (format === "edi") return parseEdi(source);
   return { format: "text", source };
 }
@@ -373,6 +397,8 @@ function setDocument(documentValue: LogDocument, options: { history?: boolean; t
   state.searchMatches = [];
   state.tablePreview = null;
   state.adifMerge = null;
+  state.preflight = null;
+  state.duplicates = documentValue.format === "adif" ? findDuplicateCandidates([documentValue], state.duplicateTolerance) : [];
   if (documentValue.format === "cabrillo") {
     state.stationCall = documentValue.lines.find((line) => line.key === "CALLSIGN")?.value ?? state.stationCall;
     state.conversionContest = documentValue.contest;
@@ -441,17 +467,19 @@ function shell(content: string): string {
         <button class="btn ghost" data-action="undo" ${!(state.undo.length || state.tableUndo.length) ? "disabled" : ""} title="Undo (Ctrl+Z)">Undo</button>
         <button class="btn ghost" data-action="redo" ${!(state.redo.length || state.tableRedo.length) ? "disabled" : ""} title="Redo (Ctrl+Y)">Redo</button>
         <button class="btn primary" data-action="choose-file">Open file</button>
-        <input id="file-input" class="hidden" type="file" accept=".log,.cbr,.cab,.adi,.adif,.edi,.txt,text/plain" />
+        <input id="file-input" class="hidden" type="file" accept=".log,.cbr,.cab,.adi,.adif,.adx,.edi,.txt,text/plain,application/xml,text/xml" />
         <input id="callbook-input" class="hidden" type="file" accept=".dta,.txt,text/plain" />
         <input id="cty-input" class="hidden" type="file" accept=".dat,.txt,text/plain" />
         <input id="adif-merge-input" class="hidden" type="file" accept=".adi,.adif,text/plain" multiple />
+        <input id="duplicate-compare-input" class="hidden" type="file" accept=".adi,.adif,.adx,text/plain,application/xml" multiple />
+        <input id="profile-import-input" class="hidden" type="file" accept=".json,application/json" />
       </div>
     </header>
     <div class="workspace">
       <aside class="sidebar" aria-label="Workflow">
         <div class="file-card"><p class="eyebrow">Current log</p><div class="file-name" title="${escapeHtml(state.fileName)}">${escapeHtml(state.fileName)}</div><div class="file-meta">${state.document ? `${state.document.format.toUpperCase()} · ${qsoCount()} QSOs · ${escapeHtml(state.encoding || "text")}` : "Files stay on this device"}</div></div>
         <nav class="nav-list">${views.map((view) => `<button class="nav-button ${state.view === view.id ? "active" : ""}" data-view="${view.id}" ${!state.document && view.id !== "open" ? "disabled" : ""}><span>${view.label}</span>${navCount(view.id) ? `<span class="nav-number">${navCount(view.id)}</span>` : ""}</button>`).join("")}</nav>
-        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6 · REG1TEST EDI<br />Log data stays local. Google Analytics usage telemetry.<br /><a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">Author recommends SH6 for free online log analysis</a></div>
+        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.7 / ADX · REG1TEST EDI<br />Log data stays local. Google Analytics usage telemetry.<br /><a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">Author recommends SH6 for free online log analysis</a></div>
       </aside>
       <main id="main-content" class="main" tabindex="-1">${content}</main>
     </div>
@@ -466,7 +494,7 @@ function emptyView(): string {
       <div><div class="drop-icon" aria-hidden="true">QSO:</div><p class="eyebrow">Private browser toolbox</p><h2>Make more of any amateur-radio log.</h2>
       <p>Work with Cabrillo, ADIF, IARU Region 1 EDI, or ordinary text. Inspect contacts, repair malformed records, convert formats, analyze activity, and score supported contests.</p>
       <div class="button-row" style="justify-content:center"><button class="btn primary" data-action="choose-file">Choose a log</button><button class="btn" data-action="sample">Try a sample</button>${draft ? `<button class="btn ghost" data-action="restore-draft">Restore local draft</button>` : ""}</div>
-      <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADIF</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
+      <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADX</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
     </div>
     <div class="status-banner info" style="margin-top:1rem"><span>i</span><div><strong>Looking for a dedicated log analyzer?</strong><br />The author recommends <a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">SH6</a>, a free online amateur-radio log analyzer.</div></div>
     ${referenceDataPanel()}
@@ -587,7 +615,7 @@ function cabrilloQtcTable(documentValue: CabrilloDocument): string {
 function adifQsoTable(documentValue: AdifDocument): string {
   const fields = ["QSO_DATE", "TIME_ON", "CALL", "BAND", "FREQ", "MODE", "RST_SENT", "STX_STRING", "RST_RCVD", "SRX_STRING"];
   const records = documentValue.records.slice(0, 1_000);
-  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>#</th>${fields.map((field) => `<th>${field.replaceAll("_", " ")}</th>`).join("")}</tr></thead><tbody>${records.map((record, index) => `<tr id="row-${escapeHtml(record.id)}" class="${state.selectedId === record.id ? "selected" : ""} ${rowHasError(record.id) ? "has-error" : ""}"><td class="line-no">${index + 1}</td>${fields.map((field) => `<td><input class="cell-input" aria-label="${field} record ${index + 1}" data-adif-id="${escapeHtml(record.id)}" data-adif-field="${field}" value="${escapeHtml(adifValue(record, field))}" /></td>`).join("")}</tr>`).join("")}</tbody></table></div>${documentValue.records.length > records.length ? `<p class="help-text">Showing the first ${records.length.toLocaleString()} of ${documentValue.records.length.toLocaleString()} records for responsiveness. Other workflows still process the full file.</p>` : ""}`;
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th><span class="sr-only">Select</span></th><th>#</th>${fields.map((field) => `<th>${field.replaceAll("_", " ")}</th>`).join("")}</tr></thead><tbody>${records.map((record, index) => `<tr id="row-${escapeHtml(record.id)}" class="${state.selectedId === record.id ? "selected" : ""} ${rowHasError(record.id) ? "has-error" : ""}"><td><input type="checkbox" data-select-qso="${escapeHtml(record.id)}" aria-label="Select ADIF record ${index + 1}" ${state.selectedRows.includes(record.id) ? "checked" : ""} /></td><td class="line-no">${index + 1}</td>${fields.map((field) => `<td><input class="cell-input" aria-label="${field} record ${index + 1}" data-adif-id="${escapeHtml(record.id)}" data-adif-field="${field}" value="${escapeHtml(adifValue(record, field))}" /></td>`).join("")}</tr>`).join("")}</tbody></table></div>${documentValue.records.length > records.length ? `<p class="help-text">Showing the first ${records.length.toLocaleString()} of ${documentValue.records.length.toLocaleString()} records for responsiveness. Other workflows still process the full file.</p>` : ""}`;
 }
 
 function ediQsoTable(documentValue: EdiDocument): string {
@@ -609,7 +637,8 @@ function paperLogger(): string {
     const inputmode = /^(?:FREQUENCY|TIME_ON|STX|SRX)$/.test(cell.key) ? ` inputmode="numeric"` : "";
     return `<label class="field"><span>${escapeHtml(label)}</span><input class="input" name="paper-cell-${index}" data-paper-index="${index}" data-paper-key="${escapeHtml(cell.key)}" type="${type}" value="${escapeHtml(cell.value)}" maxlength="${cell.end - cell.start}" ${required ? "required" : ""}${inputmode} autocomplete="off" /></label>`;
   };
-  return `<section class="card" style="margin-bottom:1rem"><div class="card-head"><h3>Manual QSO entry — ${escapeHtml(state.document.contest)}</h3><button class="btn ghost" data-action="toggle-paper">Close</button></div><div class="card-body"><form id="paper-form" novalidate><div class="field-grid three">${columns.map(input).join("")}</div><div id="paper-validation" class="status-banner info" aria-live="polite" style="margin-top:1rem"><span>i</span><div>Enter the worked station and contest exchange. Fields follow the active recovered Cabrillo layout.</div></div><div class="button-row" style="margin-top:1rem"><button class="btn primary" type="submit">Add QSO</button><span class="help-text">Enter validates and adds the contact; defaults advance for the next QSO.</span></div></form></div></section>`;
+  const fast = state.fastEntry;
+  return `<section class="card" style="margin-bottom:1rem"><div class="card-head"><h3>Manual QSO entry — ${escapeHtml(state.document.contest)}</h3><button class="btn ghost" data-action="toggle-paper">Close</button></div><div class="card-body"><h4>Structured entry</h4><form id="paper-form" novalidate><div class="field-grid three">${columns.map(input).join("")}</div><div id="paper-validation" class="status-banner info" aria-live="polite" style="margin-top:1rem"><span>i</span><div>Enter the worked station and contest exchange. Fields follow the active recovered Cabrillo layout.</div></div><div class="button-row" style="margin-top:1rem"><button class="btn primary" type="submit">Add QSO</button><span class="help-text">Enter validates and adds the contact; defaults advance for the next QSO.</span></div></form><hr /><h4>Fast field transcription</h4><p class="help-text">Use explicit tokens such as <code>DATE=20260826 TIME=1200 CALL=S53M FREQ=14.025 MODE=CW RST_S=599 RST_R=599 STX=001 SRX=042 ACT=SI-1234 NOTE=&quot;portable&quot;</code>. Date, time, band/frequency, mode, profile, and activity may carry forward and are identified below. Callsigns and QSL state never carry forward.</p><textarea id="fast-entry-source" class="raw-editor" rows="8" spellcheck="false" aria-label="Fast-entry transcription">${escapeHtml(state.fastEntrySource)}</textarea><div class="button-row" style="margin-top:.7rem"><button class="btn" data-action="preview-fast-entry">Validate transcription</button><button class="btn primary" data-action="add-fast-entry" ${!fast?.records.some((record) => record.valid) ? "disabled" : ""}>Add valid QSOs</button><button class="btn ghost" data-action="download-fast-source" ${!state.fastEntrySource ? "disabled" : ""}>Download source</button>${fast?.records.some((record) => record.valid) ? `<button class="btn ghost" data-action="download-fast" data-fast-format="adi">ADI</button><button class="btn ghost" data-action="download-fast" data-fast-format="adx">ADX</button><button class="btn ghost" data-action="download-fast" data-fast-format="cabrillo">Cabrillo</button><button class="btn ghost" data-action="download-fast" data-fast-format="csv">CSV</button>` : ""}</div>${fast ? `<div class="status-banner ${fast.records.every((record) => record.valid) ? "success" : "warning"}" style="margin-top:.7rem"><span>${fast.records.every((record) => record.valid) ? "✓" : "!"}</span><div><strong>${fast.records.filter((record) => record.valid).length} valid · ${fast.records.filter((record) => !record.valid).length} need correction</strong><br />Inherited values are visible in the table.</div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Line</th><th>Call</th><th>Date/time</th><th>Band/frequency</th><th>Mode</th><th>Inherited</th><th>Status</th></tr></thead><tbody>${fast.records.map((record) => `<tr class="${record.valid ? "" : "has-error"}"><td>${record.line}</td><td>${escapeHtml(record.values.CALL ?? "")}</td><td>${escapeHtml(`${record.values.DATE ?? ""} ${record.values.TIME ?? ""}`)}</td><td>${escapeHtml(record.values.BAND || record.values.FREQ || "")}</td><td>${escapeHtml(record.values.MODE ?? "")}</td><td>${escapeHtml(record.inherited.join(", ") || "—")}</td><td>${escapeHtml(record.valid ? "Ready" : record.errors.join(" "))}</td></tr>`).join("")}</tbody></table></div>` : ""}</div></section>`;
 }
 
 function qsosView(): string {
@@ -627,6 +656,34 @@ function problemsView(): string {
   return `${pageHead("Validation", state.diagnostics.length ? `${state.diagnostics.length} item${state.diagnostics.length === 1 ? "" : "s"} to review` : "No problems found", "Checks cover document structure, dates, times, frequency, mode, callsigns, exchanges, duplicates and recovered fixed columns.", `<button class="btn" data-action="previous-invalid" ${!state.diagnostics.length ? "disabled" : ""}>Previous invalid</button><button class="btn" data-action="next-invalid" ${!state.diagnostics.length ? "disabled" : ""}>Next invalid</button><button class="btn" data-view="repair">Preview repairs</button>`)}
     <div class="metric-grid">${metric("Errors", errors, "submission blockers")}${metric("Warnings", warnings, "manual review")}${metric("Information", state.diagnostics.length - errors - warnings, "format notes")}${metric("QSOs", qsoCount(), "records checked")}</div>
     <section class="card"><div class="card-head"><h3>Actionable diagnostics</h3></div><div class="card-body">${state.diagnostics.length ? `<div class="diagnostic-list">${state.diagnostics.map((item) => `<button class="diagnostic" data-diagnostic-id="${escapeHtml(item.id)}"><span class="severity-dot ${item.severity}"></span><span><strong>${escapeHtml(item.message)}</strong><span>${item.lineNumber ? `Line ${item.lineNumber}${item.field ? ` · ${escapeHtml(item.field)}` : ""}` : "Document-level check"}</span></span><code>${escapeHtml(item.code)}</code></button>`).join("")}</div>` : `<div class="status-banner success"><span>✓</span><div><strong>The implemented checks passed.</strong><br />Contest rules can still require organizer-specific review.</div></div>`}</div></section>`;
+}
+
+function stationProfilesPanel(): string {
+  const active = state.stationProfiles.find((profile) => profile.id === state.activeProfileId);
+  const profileWarnings = active ? validateStationProfile(active) : [];
+  const fields: Array<[keyof StationProfile, string]> = [["name", "Profile name"], ["stationCallsign", "Station callsign"], ["operator", "Operator"], ["ownerCallsign", "Owner callsign"], ["dxcc", "My DXCC"], ["country", "Country"], ["grid", "Grid"], ["latitude", "Latitude"], ["longitude", "Longitude"], ["cqZone", "CQ zone"], ["ituZone", "ITU zone"], ["state", "State"], ["county", "County"], ["iota", "IOTA"], ["pota", "POTA reference"], ["sota", "SOTA reference"], ["wwff", "WWFF reference"], ["band", "Default band"], ["frequency", "Default frequency"], ["mode", "Default mode"], ["propMode", "Propagation mode"], ["satellite", "Satellite"], ["notes", "Local notes"]];
+  return `<section class="card" style="margin-top:1rem"><div class="card-head"><h3>Station and portable profiles</h3><div class="button-row"><button class="btn ghost" data-action="import-profiles">Import</button><button class="btn ghost" data-action="export-profiles" ${!state.stationProfiles.length ? "disabled" : ""}>Export</button></div></div><div class="card-body stack"><div class="field-grid three"><label class="field"><span>Saved profile</span><select id="station-profile-select" class="select"><option value="">New profile</option>${state.stationProfiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === state.activeProfileId ? "selected" : ""}>${escapeHtml(profile.name)}</option>`).join("")}</select></label><label class="field"><span>Apply behavior</span><select id="profile-apply-mode" class="select"><option value="missing">Fill missing fields</option><option value="replace">Replace existing fields</option></select></label><div class="field field-action"><span>Target</span><span class="help-text">${state.selectedRows.length ? `${state.selectedRows.length} selected records` : "all records or date range"}</span></div><label class="field"><span>Apply from date</span><input id="profile-date-from" class="input" type="date" /></label><label class="field"><span>Apply through date</span><input id="profile-date-to" class="input" type="date" /></label><label class="field"><span>Split export by</span><select id="profile-split-criterion" class="select"><option value="station">Station identity</option><option value="date">QSO date</option><option value="activity">Activity reference</option></select></label></div><form id="station-profile-form"><input type="hidden" name="profileId" value="${escapeHtml(active?.id ?? "")}" /><div class="field-grid three">${fields.map(([key, label]) => `<label class="field"><span>${escapeHtml(label)}</span><input class="input" name="${key}" value="${escapeHtml(active?.[key] ?? "")}" ${key === "name" ? "required" : ""} /></label>`).join("")}</div>${profileWarnings.map((warning) => `<div class="status-banner warning"><span>!</span><div>${escapeHtml(warning)}</div></div>`).join("")}<div class="button-row"><button class="btn" type="submit">Save profile</button><button class="btn ghost" type="button" data-action="duplicate-profile" ${!active ? "disabled" : ""}>Duplicate</button><button class="btn ghost" type="button" data-action="delete-profile" ${!active ? "disabled" : ""}>Delete</button><button class="btn primary" type="button" data-action="preview-apply-profile" ${!active || state.document?.format !== "adif" ? "disabled" : ""}>Preview apply</button><button class="btn" type="button" data-action="split-station" ${state.document?.format !== "adif" ? "disabled" : ""}>Create split files</button></div></form><p class="help-text">Selected rows take precedence over a date range. Profiles and notes stay in this browser; notes are never written to a log.</p></div></section>`;
+}
+
+function compactTransformationReview(): string {
+  const preview = state.transformation; if (!preview) return "";
+  return `<section class="card" style="margin:1rem 0"><div class="card-head"><h3>${escapeHtml(preview.label)} · ${preview.changes.length} change${preview.changes.length === 1 ? "" : "s"}</h3><div class="button-row"><button class="btn ghost" data-action="cancel-transformation">Cancel</button><button class="btn primary" data-action="apply-transformation" ${!preview.changes.length ? "disabled" : ""}>Apply changes</button></div></div><div class="card-body">${preview.lossy ? `<div class="status-banner warning"><span>!</span><div><strong>Potentially lossy operation</strong><br />Review the affected records and keep the original file.</div></div>` : ""}${preview.warnings.map((warning) => `<div class="status-banner warning"><span>!</span><div>${escapeHtml(warning)}</div></div>`).join("")}<div class="repair-list">${preview.changes.slice(0, 200).map((change) => `<article class="repair-item"><div class="repair-title"><span>${change.lineNumber ? `Record ${change.lineNumber}` : "Record"}${change.field ? ` · ${escapeHtml(change.field)}` : ""}</span><strong>${escapeHtml(change.description)}</strong></div><div class="diff"><pre>${escapeHtml(change.before)}</pre><span>→</span><pre>${escapeHtml(change.after)}</pre></div></article>`).join("")}</div></div></section>`;
+}
+
+function preflightView(): string {
+  if (!state.document) return emptyView();
+  if (state.document.format !== "adif") return `${pageHead("Submission preflight", "Convert this log to ADIF first", "Destination profiles operate on ADI or ADX records and never upload them.")}<div class="status-banner info"><span>i</span><div><strong>ADIF document required</strong><br />Use Convert to create an ADIF preview, then open that file for destination checking.</div></div>`;
+  const result = state.preflight;
+  const profile = PREFLIGHT_PROFILES.find((item) => item.id === state.preflightProfile)!;
+  return `${pageHead("Submission preflight", "Check before uploading elsewhere", "Local checks identify documented problems but cannot guarantee acceptance by an external service.")}
+    <section class="card"><div class="card-head"><h3>Destination</h3><span class="support-chip">${escapeHtml(profile.support)} support</span></div><div class="card-body stack"><div class="field-grid three"><label class="field"><span>Preflight profile</span><select id="preflight-profile" class="select">${PREFLIGHT_PROFILES.map((item) => `<option value="${item.id}" ${item.id === state.preflightProfile ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}</select></label>${state.preflightProfile === "qrz" ? `<label class="field"><span>QRZ range start</span><input id="qrz-date-from" type="date" class="input" /></label><label class="field"><span>QRZ range end</span><input id="qrz-date-to" type="date" class="input" /></label>` : ""}</div><p>${escapeHtml(profile.description)}</p><p class="help-text">Version: ${escapeHtml(profile.version)} · reviewed ${escapeHtml(profile.reviewed)} · <a href="${escapeHtml(profile.source)}" target="_blank" rel="noopener noreferrer">source documentation</a></p><div class="button-row"><button class="btn primary" data-action="run-preflight">Run local preflight</button>${result?.diagnostics.some((item) => item.code === "ADIF-DEPRECATED-MODE") ? `<button class="btn" data-action="preview-modernize-modes">Preview mode migration</button>` : ""}${result ? `<button class="btn" data-action="download-preflight-ready">Export ready ADI</button><button class="btn ghost" data-action="download-preflight-rejected" ${!result.rejected.length ? "disabled" : ""}>Export rejected ADI</button><button class="btn ghost" data-action="download-preflight-report">HTML report</button>` : ""}</div></div></section>
+    ${result ? `<div class="metric-grid" style="margin-top:1rem">${metric("Ready", result.ready.length, "exportable records")}${metric("Rejected", result.rejected.length, "blocking errors")}${metric("Review", result.review.length, "warnings")}${metric("Findings", result.diagnostics.length, result.profile.name)}</div><section class="card"><div class="card-head"><h3>Preflight findings</h3></div><div class="card-body">${result.diagnostics.length ? `<div class="diagnostic-list">${result.diagnostics.map((item) => `<button class="diagnostic" data-preflight-diagnostic="${escapeHtml(item.id)}"><span class="severity-dot ${item.severity}"></span><span><strong>${escapeHtml(item.message)}</strong><span>${item.lineNumber ? `Record ${item.lineNumber}${item.field ? ` · ${escapeHtml(item.field)}` : ""}` : "Document-level"}${item.suggestion ? ` · ${escapeHtml(item.suggestion)}` : ""}</span></span><code>${escapeHtml(item.code)}</code></button>`).join("")}</div>` : `<div class="status-banner success"><span>✓</span><div><strong>All implemented ${escapeHtml(result.profile.name)} checks passed.</strong><br />Final acceptance remains the destination service's responsibility.</div></div>`}</div></section>` : ""}${compactTransformationReview()}${stationProfilesPanel()}`;
+}
+
+function duplicateView(): string {
+  if (!state.document) return emptyView();
+  if (state.document.format !== "adif") return `${pageHead("Duplicate workbench", "Open an ADIF or ADX log", "Duplicate comparison operates on structured ADIF fields.")}<div class="status-banner info"><span>i</span><div>Convert the current file to ADIF before reviewing duplicate candidates.</div></div>`;
+  return `${pageHead("Duplicate workbench", `${state.duplicates.length} candidate${state.duplicates.length === 1 ? "" : "s"}`, "Exact, LoTW, near, possible, and activity-aware matches are shown separately.", `<button class="btn" data-action="choose-duplicate-files">Compare other files</button><button class="btn" data-action="download-duplicate-report" ${!state.duplicates.length ? "disabled" : ""}>Download CSV report</button>`)}<section class="card" style="margin-bottom:1rem"><div class="card-body"><div class="field-grid"><label class="field"><span>Near-match tolerance (minutes)</span><input id="duplicate-tolerance" class="input" type="number" min="0" max="60" value="${state.duplicateTolerance}" /></label><div class="field field-action"><span>Recheck</span><button class="btn" data-action="scan-duplicates">Scan current log</button></div></div></div></section>${compactTransformationReview()}${state.duplicates.length ? `<div class="duplicate-list">${state.duplicates.slice(0, 500).map((candidate) => `<section class="card"><div class="card-head"><h3>${escapeHtml(candidate.kind)} · ${escapeHtml(adifValue(candidate.first, "CALL"))}</h3><span class="help-text">${escapeHtml(candidate.reason)}</span></div><div class="card-body"><div class="grid-2"><pre class="code-preview">${escapeHtml(candidate.first.tags.map((tag) => `${tag.name}=${tag.value}`).join("\n"))}</pre><pre class="code-preview">${escapeHtml(candidate.second.tags.map((tag) => `${tag.name}=${tag.value}`).join("\n"))}</pre></div><p class="help-text">Differing fields: ${escapeHtml(candidate.differingFields.join(", ") || "none")}</p>${candidate.differingFields.length ? `<div class="field-grid three">${candidate.differingFields.map((field) => `<label class="field"><span>${escapeHtml(field)}</span><select class="select" data-duplicate-choice="${candidate.id}" data-duplicate-field="${escapeHtml(field)}"><option value="first">First: ${escapeHtml(adifValue(candidate.first, field) || "empty")}</option><option value="second">Second: ${escapeHtml(adifValue(candidate.second, field) || "empty")}</option></select></label>`).join("")}</div>` : ""}<div class="button-row"><button class="btn" data-action="resolve-duplicate" data-duplicate-id="${candidate.id}" data-resolution="keep-first">Keep first</button><button class="btn" data-action="resolve-duplicate" data-duplicate-id="${candidate.id}" data-resolution="keep-last">Keep last</button><button class="btn ghost" data-action="resolve-duplicate" data-duplicate-id="${candidate.id}" data-resolution="keep-both">Keep both</button><button class="btn primary" data-action="resolve-duplicate" data-duplicate-id="${candidate.id}" data-resolution="merge">Merge chosen fields</button></div></div></section>`).join("")}</div>` : `<div class="status-banner success"><span>✓</span><div><strong>No duplicate candidates found.</strong><br />The indexed matcher checked the current document.</div></div>`}`;
 }
 
 function repairView(): string {
@@ -799,13 +856,14 @@ function statisticsView(): string {
     <section class="card" style="margin-top:1rem"><div class="card-head"><h3>Country and continent totals</h3><span class="help-text">Resolved locally from the recovered DXCC table; treat as assistance</span></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>Country</th><th>Continent</th><th>QSOs</th><th>Points</th></tr></thead><tbody>${score.byCountry.map((row) => `<tr><td>${escapeHtml(row.country)}</td><td>${escapeHtml(row.continent || "—")}</td><td>${row.qsos}</td><td>${row.points}</td></tr>`).join("")}</tbody></table></div></div></section>`;
 }
 
-function buildConversion(type: "adif" | "cabrillo" | "edi" | "csv"): ConversionResult | null {
+function buildConversion(type: "adif" | "adx" | "cabrillo" | "edi" | "csv"): ConversionResult | null {
   if (!state.document) return null;
   if (type === "csv" && state.document.format === "edi") return ediToCsv(state.document, state.csvDelimiter);
   if (type === "csv" && (state.document.format === "cabrillo" || state.document.format === "adif")) return documentToCsv(state.document, state.csvDelimiter);
   if (type === "adif" && state.document.format === "edi") return ediToAdif(state.document);
   if (type === "adif" && state.document.format === "cabrillo") return cabrilloToAdif(state.document, { fieldMap: state.cabrilloToAdifMap });
   if (type === "adif" && state.document.format === "adif") return { content: serializeAdifWithOptions(state.document, state.adifOptions), warnings: [], records: state.document.records.length };
+  if (type === "adx" && state.document.format === "adif") return { content: serializeAdx(state.document), warnings: state.document.container === "adi" ? ["ADX is canonical XML output; keep the original ADI file for exact source recovery."] : [], records: state.document.records.length };
   if (type === "cabrillo" && state.document.format === "adif") return adifToCabrillo(state.document, state.stationCall, state.conversionContest, { fieldMap: state.adifToCabrilloMap });
   return { content: sourceOf(state.document), warnings: [], records: qsoCount() };
 }
@@ -813,7 +871,7 @@ function buildConversion(type: "adif" | "cabrillo" | "edi" | "csv"): ConversionR
 function exportView(): string {
   if (!state.document) return emptyView();
   const opposite = state.document.format === "cabrillo" ? "adif" : state.document.format === "adif" ? "cabrillo" : state.document.format === "edi" ? "adif" : null;
-  const currentExtension = state.document.format === "adif" ? "adi" : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt";
+  const currentExtension = state.document.format === "adif" ? state.document.container : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt";
   const preview = state.conversion;
   const filterPreview = state.transformation?.operationId === "filter-adif" ? state.transformation : null;
   const mappingCard = (() => {
@@ -841,6 +899,7 @@ function exportView(): string {
     ${mappingCard}
     <div class="grid-2"><section class="card"><div class="card-head"><h3>Available outputs</h3></div><div class="card-body stack">
       <button class="btn dark" data-action="preview-export" data-export-type="${state.document.format === "adif" ? "adif" : state.document.format === "cabrillo" ? "cabrillo" : state.document.format === "edi" ? "edi" : "csv"}">Preview current ${state.document.format.toUpperCase()}</button>
+      ${state.document.format === "adif" ? `<button class="btn" data-action="preview-export" data-export-type="adx">Create ADX XML</button>` : ""}
       ${opposite ? `<button class="btn" data-action="preview-export" data-export-type="${opposite}">Convert to ${opposite.toUpperCase()}</button>` : ""}
       ${state.document.format !== "text" ? `<label class="field"><span>CSV delimiter</span><select id="csv-delimiter" class="select"><option value="," ${state.csvDelimiter === "," ? "selected" : ""}>Comma</option><option value=";" ${state.csvDelimiter === ";" ? "selected" : ""}>Semicolon</option></select></label><button class="btn" data-action="preview-export" data-export-type="csv">Create CSV table</button>` : ""}
       <p class="help-text">Current source downloads as .${currentExtension}. Converted output is intentionally canonicalized and may be lossy; keep your original file.</p>
@@ -853,6 +912,8 @@ function viewContent(): string {
     case "header": return headerView();
     case "qsos": return qsosView();
     case "problems": return problemsView();
+    case "preflight": return preflightView();
+    case "duplicates": return duplicateView();
     case "repair": return repairView();
     case "search": return searchView();
     case "convert": return convertView();
@@ -884,13 +945,18 @@ function toast(message: string): void {
 
 function download(content: string, extension: string): void {
   const base = state.fileName.replace(/\.[^.]+$/, "") || "radio-log";
+  downloadNamed(content, `${base}.${extension}`);
+}
+
+function downloadNamed(content: string, fileName: string): void {
+  const extension = fileName.split(".").at(-1) ?? "txt";
   const suffix = extension.split(".").at(-1)?.toLowerCase();
-  const mime = suffix === "csv" ? "text/csv;charset=utf-8" : suffix === "html" ? "text/html;charset=utf-8" : suffix === "svg" ? "image/svg+xml;charset=utf-8" : "text/plain;charset=utf-8";
+  const mime = suffix === "csv" ? "text/csv;charset=utf-8" : suffix === "html" ? "text/html;charset=utf-8" : suffix === "svg" ? "image/svg+xml;charset=utf-8" : suffix === "adx" || suffix === "xml" ? "application/xml;charset=utf-8" : suffix === "json" ? "application/json;charset=utf-8" : "text/plain;charset=utf-8";
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${base}.${extension}`;
+  link.download = fileName;
   link.click();
   URL.revokeObjectURL(url);
   trackEvent("file_download", { format: suffix || "text", document_format: state.document?.format ?? "none" });
@@ -1037,6 +1103,14 @@ function addPaperQso(form: HTMLFormElement): void {
   state.paperOpen = true;
 }
 
+function fastEntryDocument(): AdifDocument | null {
+  if (!state.fastEntry) return null;
+  let documentValue = parseAdif(fastEntryToAdif(state.fastEntry));
+  const profile = state.stationProfiles.find((item) => item.id === state.activeProfileId);
+  if (profile) documentValue = applyStationProfile(documentValue, profile, undefined, "missing").document;
+  return documentValue;
+}
+
 function showPaperValidation(form: HTMLFormElement, messages: readonly string[], invalid: boolean): void {
   const target = form.querySelector<HTMLElement>("#paper-validation");
   if (!target) return;
@@ -1091,7 +1165,7 @@ function navigateInvalid(direction: "forward" | "backward"): void {
 }
 
 app.addEventListener("click", (event) => {
-  const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action], [data-view], [data-diagnostic-id], [data-search-line], [data-search-offset], [data-table-operation], [data-analytics]");
+  const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action], [data-view], [data-diagnostic-id], [data-preflight-diagnostic], [data-search-line], [data-search-offset], [data-table-operation], [data-analytics]");
   if (!target) return;
   const documentFormat = state.document?.format ?? "none";
   if (target.dataset.analytics) trackEvent("outbound_link", { action: target.dataset.analytics, view: state.view, document_format: documentFormat });
@@ -1101,6 +1175,11 @@ app.addEventListener("click", (event) => {
   if (target.dataset.diagnosticId) {
     trackEvent("diagnostic_open", { document_format: documentFormat, view: state.view });
     const item = state.diagnostics.find((candidate) => candidate.id === target.dataset.diagnosticId);
+    if (item?.lineId) { state.selectedId = item.lineId; state.view = "qsos"; render(); }
+    return;
+  }
+  if (target.dataset.preflightDiagnostic) {
+    const item = state.preflight?.diagnostics.find((candidate) => candidate.id === target.dataset.preflightDiagnostic);
     if (item?.lineId) { state.selectedId = item.lineId; state.view = "qsos"; render(); }
     return;
   }
@@ -1171,6 +1250,35 @@ app.addEventListener("click", (event) => {
       break;
     }
     case "choose-adif-merge": document.querySelector<HTMLInputElement>("#adif-merge-input")?.click(); break;
+    case "choose-duplicate-files": document.querySelector<HTMLInputElement>("#duplicate-compare-input")?.click(); break;
+    case "import-profiles": document.querySelector<HTMLInputElement>("#profile-import-input")?.click(); break;
+    case "export-profiles": downloadNamed(JSON.stringify({ version: 1, profiles: state.stationProfiles }, null, 2), "station-profiles.json"); break;
+    case "duplicate-profile": {
+      const profile = state.stationProfiles.find((item) => item.id === state.activeProfileId); if (!profile) break;
+      const copy = { ...profile, id: crypto.randomUUID(), name: `${profile.name} copy` }; state.stationProfiles.push(copy); state.activeProfileId = copy.id; localStorage.setItem("log-workbench:station-profiles:v1", JSON.stringify({ version: 1, profiles: state.stationProfiles })); render(); break;
+    }
+    case "delete-profile": {
+      const profile = state.stationProfiles.find((item) => item.id === state.activeProfileId); if (!profile || !window.confirm(`Delete station profile “${profile.name}”?`)) break;
+      state.stationProfiles = state.stationProfiles.filter((item) => item.id !== profile.id); state.activeProfileId = ""; localStorage.setItem("log-workbench:station-profiles:v1", JSON.stringify({ version: 1, profiles: state.stationProfiles })); render(); toast("Station profile deleted from this browser."); break;
+    }
+    case "preview-apply-profile": if (state.document?.format === "adif") {
+      const profile = state.stationProfiles.find((item) => item.id === state.activeProfileId); if (!profile) break;
+      const mode = document.querySelector<HTMLSelectElement>("#profile-apply-mode")?.value === "replace" ? "replace" : "missing"; const from = document.querySelector<HTMLInputElement>("#profile-date-from")?.value.replaceAll("-", "") ?? ""; const to = document.querySelector<HTMLInputElement>("#profile-date-to")?.value.replaceAll("-", "") ?? ""; const rangeIds = state.document.records.filter((record) => { const date = adifValue(record, "QSO_DATE"); return (!from || date >= from) && (!to || date <= to); }).map((record) => record.id); const ids = state.selectedRows.length ? state.selectedRows : from || to ? rangeIds : undefined; const applied = applyStationProfile(state.document, profile, ids, mode);
+      showTransformation({ operationId: "apply-station-profile", label: `Apply station profile ${profile.name}`, before: state.document, after: applied.document, changes: applied.changes.map((change) => ({ targetId: change.recordId, field: change.field, before: change.before, after: change.after, description: `${change.field}: ${change.before || "empty"} → ${change.after}` })), warnings: mode === "replace" ? ["Existing station fields will be replaced where the profile supplies a value."] : [], lossy: mode === "replace" && applied.changes.some((change) => change.before) }); break;
+    }
+    case "split-station": if (state.document?.format === "adif") { const criterion = (document.querySelector<HTMLSelectElement>("#profile-split-criterion")?.value ?? "station") as SplitCriterion; const groups = splitAdif(state.document, criterion); for (const [identity, part] of groups) downloadNamed(serializeAdifWithOptions(part), safeProfileFilename(`${criterion}-${identity}`)); toast(`${groups.size} ${criterion} file${groups.size === 1 ? "" : "s"} prepared locally.`); break; }
+    case "run-preflight": if (state.document?.format === "adif") { state.preflight = runPreflight(state.document, state.preflightProfile, { qrzDateFrom: document.querySelector<HTMLInputElement>("#qrz-date-from")?.value, qrzDateTo: document.querySelector<HTMLInputElement>("#qrz-date-to")?.value }); trackEvent("preflight_complete", { profile: state.preflightProfile, result: state.preflight.rejected.length ? "blocked" : "ready", record_bucket: countBucket(state.document.records.length) }); render(); break; }
+    case "preview-modernize-modes": if (state.document?.format === "adif") { const migrated = modernizeDeprecatedModes(state.document); showTransformation({ operationId: "modernize-adif-modes", label: "Modernize deprecated ADIF modes", before: state.document, after: migrated.document, changes: migrated.changes.map((change) => ({ targetId: change.recordId, field: "MODE", before: change.before, after: change.after, description: `${change.before} → ${change.after}` })), warnings: [], lossy: false }); break; }
+    case "download-preflight-ready": if (state.document?.format === "adif" && state.preflight) downloadNamed(serializeAdifWithOptions(preflightSubset(state.document, state.preflight.ready)), "preflight-ready.adi"); break;
+    case "download-preflight-rejected": if (state.document?.format === "adif" && state.preflight) downloadNamed(serializeAdifWithOptions(preflightSubset(state.document, state.preflight.rejected)), "preflight-rejected.adi"); break;
+    case "download-preflight-report": if (state.preflight) downloadNamed(preflightReportHtml(state.preflight), "preflight-report.html"); break;
+    case "scan-duplicates": if (state.document?.format === "adif") { state.duplicateTolerance = Math.max(0, Math.min(60, Number(document.querySelector<HTMLInputElement>("#duplicate-tolerance")?.value ?? 5))); state.duplicates = findDuplicateCandidates([state.document], state.duplicateTolerance); trackEvent("duplicate_scan", { result: state.duplicates.length ? "matches" : "none", record_bucket: countBucket(state.document.records.length) }); render(); break; }
+    case "download-duplicate-report": downloadNamed(duplicateReportCsv(state.duplicates), "duplicate-review.csv"); break;
+    case "resolve-duplicate": if (state.document?.format === "adif" && target.dataset.duplicateId) { const candidate = state.duplicates.find((item) => item.id === target.dataset.duplicateId); if (!candidate) break; const resolution = target.dataset.resolution as "keep-first" | "keep-last" | "keep-both" | "merge"; if (resolution === "keep-both") { state.duplicates = state.duplicates.filter((item) => item.id !== candidate.id); render(); break; } const choices: Record<string, "first" | "second"> = {}; document.querySelectorAll<HTMLSelectElement>(`[data-duplicate-choice="${candidate.id}"]`).forEach((select) => { if (select.dataset.duplicateField) choices[select.dataset.duplicateField] = select.value === "second" ? "second" : "first"; }); const after = resolveDuplicate(state.document, candidate, resolution, choices); showTransformation({ operationId: "resolve-duplicate", label: `${resolution.replaceAll("-", " ")} duplicate`, before: state.document, after, changes: [{ targetId: candidate.second.id, before: candidate.reason, after: resolution, description: `${resolution} ${adifValue(candidate.first, "CALL")}` }], warnings: resolution === "merge" && candidate.differingFields.length ? ["The displayed field choices control conflicting nonblank values; review this record-level preview before applying."] : [], lossy: resolution !== "merge" }); break; }
+    case "preview-fast-entry": { const input = document.querySelector<HTMLTextAreaElement>("#fast-entry-source"); state.fastEntrySource = input?.value ?? state.fastEntrySource; const profile = state.stationProfiles.find((item) => item.id === state.activeProfileId); state.fastEntry = parseFastEntry(state.fastEntrySource, { stationProfile: profile?.name, serial: 1 }); localStorage.setItem("log-workbench:fast-entry-draft:v1", state.fastEntrySource); render(); break; }
+    case "download-fast-source": downloadNamed(state.fastEntrySource, "field-transcription.txt"); break;
+    case "download-fast": { const documentValue = fastEntryDocument(); if (!documentValue) break; const format = target.dataset.fastFormat; if (format === "adx") downloadNamed(serializeAdx(documentValue), "field-transcription.adx"); else if (format === "cabrillo") downloadNamed(adifToCabrillo(documentValue, state.stationCall || "N0CALL", state.document?.format === "cabrillo" ? state.document.contest : state.conversionContest).content, "field-transcription.log"); else if (format === "csv") downloadNamed(documentToCsv(documentValue).content, "field-transcription.csv"); else downloadNamed(serializeAdifWithOptions(documentValue), "field-transcription.adi"); break; }
+    case "add-fast-entry": if (state.document?.format === "cabrillo" && state.fastEntry) { const adifDocument = fastEntryDocument()!; const converted = parseCabrillo(adifToCabrillo(adifDocument, state.stationCall || state.document.lines.find((line) => line.key === "CALLSIGN")?.value || "N0CALL", state.document.contest).content); const newRows = converted.lines.filter((line) => line.qso).map((line) => line.raw); const lines = state.document.lines.map((line) => line.raw); const end = state.document.lines.findIndex((line) => line.key === "END-OF-LOG"); lines.splice(end >= 0 ? end : lines.length, 0, ...newRows); setDocument(parseCabrillo(`${lines.join(state.document.newline)}${state.document.newline}`), { toast: `${newRows.length} valid transcribed QSO${newRows.length === 1 ? "" : "s"} added. Undo is available.` }); state.paperOpen = true; break; }
     case "reset-conversion-map": {
       if (target.dataset.mapDirection === "cabrillo-adif") state.cabrilloToAdifMap = {};
       else state.adifToCabrilloMap = {};
@@ -1186,7 +1294,7 @@ app.addEventListener("click", (event) => {
     case "undo": undo(); break;
     case "redo": redo(); break;
     case "apply-raw": { const raw = document.querySelector<HTMLTextAreaElement>("#raw-source"); if (raw) setDocument(parseSource(raw.value), { toast: "Source changes applied." }); break; }
-    case "download-original": if (state.document) download(sourceOf(state.document), state.document.format === "adif" ? "adi" : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt"); break;
+    case "download-original": if (state.document) download(sourceOf(state.document), state.document.format === "adif" ? state.document.container : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt"); break;
     case "toggle-nonprinting": state.showNonprinting = !state.showNonprinting; render(); break;
     case "goto-position": if (state.document) {
       const line = Number(document.querySelector<HTMLInputElement>("#goto-line")?.value ?? 1);
@@ -1380,12 +1488,12 @@ app.addEventListener("click", (event) => {
     case "download-statistics-csv": if (state.document?.format === "cabrillo" && state.score) download(activityToCsv(activityBuckets(state.document, state.score.rows, state.statisticsInterval, { start: state.statisticsStart || undefined, end: state.statisticsEnd || undefined })), "activity.csv"); break;
     case "download-statistics-svg": if (state.document?.format === "cabrillo" && state.score) download(activityChartSvg(activityBuckets(state.document, state.score.rows, state.statisticsInterval, { start: state.statisticsStart || undefined, end: state.statisticsEnd || undefined }), `${state.document.contest} activity`), "activity.svg"); break;
     case "preview-export": {
-      const type = target.dataset.exportType as "adif" | "cabrillo" | "edi" | "csv";
+      const type = target.dataset.exportType as "adif" | "adx" | "cabrillo" | "edi" | "csv";
       const result = buildConversion(type);
       if (result) { trackEvent("conversion_preview", { document_format: state.document?.format ?? "none", format: type, record_bucket: countBucket(result.records), result: result.warnings.length ? "warning" : "success" }); state.conversion = { type, result }; render(); }
       break;
     }
-    case "download-preview": if (state.conversion) download(state.conversion.result.content, state.conversion.type === "adif" ? "adi" : state.conversion.type === "cabrillo" ? "log" : state.conversion.type === "edi" ? "edi" : "csv"); break;
+    case "download-preview": if (state.conversion) download(state.conversion.result.content, state.conversion.type === "adif" ? "adi" : state.conversion.type === "adx" ? "adx" : state.conversion.type === "cabrillo" ? "log" : state.conversion.type === "edi" ? "edi" : "csv"); break;
     case "clear-draft": clearDraft(); toast("Local draft removed."); break;
   }
 });
@@ -1444,6 +1552,7 @@ app.addEventListener("change", async (event) => {
     }
   }
   if (target.id === "file-input" && target instanceof HTMLInputElement && target.files?.[0]) await openFile(target.files[0]);
+  if (target.id === "profile-import-input" && target instanceof HTMLInputElement && target.files?.[0]) { try { const store = parseProfileStore(await target.files[0].text()); state.stationProfiles = store.profiles; state.activeProfileId = store.profiles[0]?.id ?? ""; localStorage.setItem("log-workbench:station-profiles:v1", JSON.stringify(store)); render(); toast(`${store.profiles.length} station profile${store.profiles.length === 1 ? "" : "s"} imported locally.`); } catch (error) { toast(error instanceof Error ? error.message : String(error)); } }
   if (target.id === "callbook-input" && target instanceof HTMLInputElement && target.files?.[0]) {
     masterRequestVersion += 1;
     const file = target.files[0];
@@ -1491,6 +1600,10 @@ app.addEventListener("change", async (event) => {
     render();
     toast(`${files.length} ADIF file${files.length === 1 ? "" : "s"} prepared for merge.`);
   }
+  if (target.id === "duplicate-compare-input" && target instanceof HTMLInputElement && target.files?.length && state.document?.format === "adif") {
+    const files = [...target.files]; const documents = await Promise.all(files.map(async (file) => { const source = await file.text(); return file.name.toLowerCase().endsWith(".adx") || /<(?:[\w.-]+:)?ADX\b/i.test(source) ? parseAdx(source) : parseAdif(source); })); const combined = mergeAdif([state.document, ...documents], "keep-all").document; const added = combined.records.length - state.document.records.length;
+    showTransformation({ operationId: "load-duplicate-comparison", label: `Add ${files.length} comparison file${files.length === 1 ? "" : "s"}`, before: state.document, after: combined, changes: [{ targetId: "comparison-files", before: `${state.document.records.length} current records`, after: `${combined.records.length} combined records`, description: `${added} records will be added for duplicate review` }], warnings: ["Applying adds the comparison records to this local working document. Resolve candidates afterward or Undo to restore the original."], lossy: false });
+  }
   if (target.dataset.headerKey && state.document?.format === "cabrillo") setDocument(updateHeader(state.document, target.dataset.headerKey, target.value), { toast: `${target.dataset.headerKey} updated.` });
   if (target.dataset.ediHeaderKey && state.document?.format === "edi") setDocument(updateEdiHeader(state.document, target.dataset.ediHeaderKey, target.value), { toast: `${target.dataset.ediHeaderKey} updated.` });
   if (target.dataset.qsoId && target.dataset.qsoField && state.document?.format === "cabrillo") setDocument(updateQsoCell(state.document, target.dataset.qsoId, target.dataset.qsoField, target.value.toUpperCase()));
@@ -1506,6 +1619,8 @@ app.addEventListener("change", async (event) => {
   if (target.id === "score-rule") { state.ruleId = target.value; state.scoreOverrides = {}; if (state.document?.format === "cabrillo") state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides); render(); }
   if (target.id === "edi-score-formula") { state.ediScoreFormula = target.value as EdiScoreFormula | "auto"; render(); }
   if (target.id === "station-call") state.stationCall = target.value.toUpperCase();
+  if (target.id === "station-profile-select") { state.activeProfileId = target.value; render(); }
+  if (target.id === "preflight-profile") { state.preflightProfile = target.value as PreflightProfileId; state.preflight = null; trackEvent("preflight_profile_select", { profile: state.preflightProfile }); render(); }
   if (target.id === "conversion-contest") { state.conversionContest = target.value.toUpperCase(); state.conversion = null; render(); }
   if (target.id === "adif-lowercase" && target instanceof HTMLInputElement) state.adifOptions.tagCase = target.checked ? "lower" : "upper";
   if (target.id === "adif-types" && target instanceof HTMLInputElement) state.adifOptions.includeTypes = target.checked;
@@ -1518,11 +1633,14 @@ app.addEventListener("change", async (event) => {
 
 app.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
-  if (form.id === "paper-form") { event.preventDefault(); trackEvent("manual_qso_submit", { document_format: "cabrillo", view: state.view }); addPaperQso(form); }
+  const formId = form.getAttribute("id");
+  if (formId === "paper-form") { event.preventDefault(); trackEvent("manual_qso_submit", { document_format: "cabrillo", view: state.view }); addPaperQso(form); }
+  if (formId === "station-profile-form") { event.preventDefault(); const data = new FormData(form); const name = String(data.get("name") ?? "").trim(); if (!name) { toast("Profile name is required."); return; } const id = String(data.get("profileId") || crypto.randomUUID()); const profile: StationProfile = { id, name }; for (const key of ["stationCallsign", "operator", "ownerCallsign", "dxcc", "country", "grid", "latitude", "longitude", "cqZone", "ituZone", "state", "county", "iota", "pota", "sota", "wwff", "band", "frequency", "mode", "propMode", "satellite", "notes"] as const) { const value = String(data.get(key) ?? "").trim(); if (value) profile[key] = value; } const index = state.stationProfiles.findIndex((item) => item.id === id); if (index >= 0) state.stationProfiles[index] = profile; else state.stationProfiles.push(profile); state.activeProfileId = id; localStorage.setItem("log-workbench:station-profiles:v1", JSON.stringify({ version: 1, profiles: state.stationProfiles })); trackEvent("station_profile_save", { result: index >= 0 ? "updated" : "created" }); render(); const warnings = validateStationProfile(profile); toast(warnings.length ? `Profile saved with ${warnings.length} warning${warnings.length === 1 ? "" : "s"} to review.` : "Station profile saved locally."); }
 });
 
 app.addEventListener("input", (event) => {
   const target = event.target as HTMLElement;
+  if (target.id === "fast-entry-source" && target instanceof HTMLTextAreaElement) { state.fastEntrySource = target.value; localStorage.setItem("log-workbench:fast-entry-draft:v1", target.value); }
   const form = target.closest<HTMLFormElement>("#paper-form");
   if (form && (target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) validatePaperForm(form);
 });

@@ -7,6 +7,7 @@ export function detectFormat(source: string, fileName = ""): LogFormat {
     return "cabrillo";
   }
   if (/^\s*\[REG1TEST;[^\]]+\]/im.test(sample) || /^\s*\[QSORecords;\d+\]/im.test(sample)) return "edi";
+  if (/<(?:[\w.-]+:)?ADX\b/i.test(sample) || extension === "adx") return "adif";
   if (/<(?:ADIF_VER|EOH|CALL|QSO_DATE|EOR)(?::|>)/i.test(sample)) return "adif";
   if (extension === "edi") return "edi";
   if (extension === "adi" || extension === "adif") return "adif";

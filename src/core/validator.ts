@@ -4,6 +4,7 @@ import { geography } from "./geography";
 import { isFixedWidthQso } from "./cabrillo";
 import { isWaedcEuropean } from "./waedc";
 import { EDI_MODE_NAMES, EDI_QSO_FIELDS, ediField, ediHeader } from "./edi";
+import { ADIF_CURRENT_VERSION, ADIF_FIELD_RULES, DEPRECATED_MODE_MAP, frequencyBand, validAdifDate, validAdifTime, validGrid } from "./adif-schema";
 import type { AdifDocument, CabrilloDocument, Diagnostic, EdiDocument } from "./types";
 
 function validDate(value: string): boolean {
@@ -183,18 +184,43 @@ function validateWaedcQtcs(document: CabrilloDocument, diagnostics: Diagnostic[]
 
 export function validateAdif(document: AdifDocument): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  for (const warning of document.parseWarnings ?? []) diagnostics.push({ id: `ADX-PARSE-${diagnostics.length}`, severity: "error", code: "ADX-PARSE", message: warning, category: "syntax" });
+  const version = document.header.find((tag) => tag.name === "ADIF_VER")?.value.trim();
+  if (!version) diagnostics.push({ id: "ADIF-VERSION-MISSING", severity: "warning", code: "ADIF-VERSION-MISSING", message: "The header has no ADIF_VER declaration.", category: "conformance", suggestion: `Add ADIF_VER ${ADIF_CURRENT_VERSION} when exporting a repaired copy.` });
+  else if (!/^\d+\.\d+\.\d+$/.test(version)) diagnostics.push({ id: "ADIF-VERSION-MALFORMED", severity: "error", code: "ADIF-VERSION-MALFORMED", message: `ADIF_VER “${version}” is malformed.`, category: "syntax", field: "ADIF_VER" });
+  else if (version.localeCompare(ADIF_CURRENT_VERSION, undefined, { numeric: true }) > 0) diagnostics.push({ id: "ADIF-VERSION-FUTURE", severity: "warning", code: "ADIF-VERSION-FUTURE", message: `This file declares ADIF ${version}, newer than bundled ${ADIF_CURRENT_VERSION}; unknown fields are preserved but may not be validated.`, category: "conformance", field: "ADIF_VER" });
+  else if (version !== ADIF_CURRENT_VERSION) diagnostics.push({ id: "ADIF-VERSION-OLDER", severity: "info", code: "ADIF-VERSION-OLDER", message: `This file declares ADIF ${version}; repaired exports default to ${ADIF_CURRENT_VERSION}.`, category: "conformance", field: "ADIF_VER" });
   document.records.forEach((record, index) => {
     const lineNumber = index + 1;
     const call = adifValue(record, "CALL");
     if (!call) push(diagnostics, "error", "ADIF-CALL-EMPTY", "CALL is required.", record.id, lineNumber, "CALL");
     else if (!isPlausibleCallsign(call)) push(diagnostics, "warning", "ADIF-CALL", `${call} looks like an unusual callsign.`, record.id, lineNumber, "CALL");
     const date = adifValue(record, "QSO_DATE");
-    if (!/^\d{8}$/.test(date)) push(diagnostics, "error", "ADIF-DATE", "QSO_DATE must contain YYYYMMDD.", record.id, lineNumber, "QSO_DATE");
+    if (!validAdifDate(date)) push(diagnostics, "error", "ADIF-DATE", "QSO_DATE must be a valid YYYYMMDD date.", record.id, lineNumber, "QSO_DATE");
     const time = adifValue(record, "TIME_ON") || adifValue(record, "TIME_OFF");
-    if (!/^\d{4}(?:\d{2})?$/.test(time)) push(diagnostics, "error", "ADIF-TIME", "TIME_ON or TIME_OFF must contain HHMM or HHMMSS.", record.id, lineNumber, "TIME_ON");
+    if (!validAdifTime(time)) push(diagnostics, "error", "ADIF-TIME", "TIME_ON or TIME_OFF must contain valid HHMM or HHMMSS UTC.", record.id, lineNumber, "TIME_ON");
     const band = adifValue(record, "BAND") || bandFromFrequency(adifValue(record, "FREQ"));
     if (!band) push(diagnostics, "warning", "ADIF-BAND", "BAND or a recognizable FREQ is required for Cabrillo conversion.", record.id, lineNumber, "BAND");
     if (!adifValue(record, "MODE")) push(diagnostics, "error", "ADIF-MODE", "MODE is required.", record.id, lineNumber, "MODE");
+    for (const tag of record.tags) {
+      const declared = /^<\s*[A-Z][A-Z0-9_]*:(\d+)/i.exec(tag.raw)?.[1];
+      if (declared !== undefined && Number(declared) !== tag.value.length) push(diagnostics, "error", "ADIF-LENGTH", `${tag.name} declares ${declared} characters but contains ${tag.value.length}.`, record.id, lineNumber, tag.name);
+      const rule = ADIF_FIELD_RULES[tag.name]; if (!rule) continue;
+      if (tag.type && tag.type.toUpperCase() !== rule.type && !(rule.type === "E" && tag.type.toUpperCase() === "S")) push(diagnostics, "warning", "ADIF-TYPE", `${tag.name} declares type ${tag.type}; the bundled definition uses ${rule.type}.`, record.id, lineNumber, tag.name);
+      if (rule.type === "N" && (!/^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)$/.test(tag.value) || (rule.minimum !== undefined && Number(tag.value) < rule.minimum) || (rule.maximum !== undefined && Number(tag.value) > rule.maximum))) push(diagnostics, "error", "ADIF-NUMBER", `${tag.name} is outside its numeric definition.`, record.id, lineNumber, tag.name);
+      if (rule.type === "D" && !validAdifDate(tag.value)) push(diagnostics, "error", "ADIF-DATE-TYPE", `${tag.name} is not a valid ADIF date.`, record.id, lineNumber, tag.name);
+      if (rule.type === "T" && !validAdifTime(tag.value)) push(diagnostics, "error", "ADIF-TIME-TYPE", `${tag.name} is not a valid ADIF time.`, record.id, lineNumber, tag.name);
+      if (rule.type === "G" && !validGrid(tag.value)) push(diagnostics, "error", "ADIF-GRID", `${tag.name} is not a valid Maidenhead locator.`, record.id, lineNumber, tag.name);
+      if (rule.values && !rule.values.includes(tag.value.toUpperCase())) push(diagnostics, "error", "ADIF-ENUM", `${tag.name} value “${tag.value}” is not in the bundled ADIF enumeration.`, record.id, lineNumber, tag.name);
+    }
+    const explicitBand = adifValue(record, "BAND").toUpperCase(); const freqBand = frequencyBand(adifValue(record, "FREQ"));
+    if (explicitBand && freqBand && explicitBand !== freqBand) push(diagnostics, "error", "ADIF-BAND-FREQ", `BAND ${explicitBand} conflicts with FREQ, which resolves to ${freqBand}.`, record.id, lineNumber, "FREQ");
+    const explicitRx = adifValue(record, "BAND_RX").toUpperCase(); const freqRxBand = frequencyBand(adifValue(record, "FREQ_RX"));
+    if (explicitRx && freqRxBand && explicitRx !== freqRxBand) push(diagnostics, "error", "ADIF-BAND-RX-FREQ", `BAND_RX ${explicitRx} conflicts with FREQ_RX, which resolves to ${freqRxBand}.`, record.id, lineNumber, "FREQ_RX");
+    const mode = adifValue(record, "MODE").toUpperCase(); if (DEPRECATED_MODE_MAP[mode]) { const replacement = DEPRECATED_MODE_MAP[mode]!; diagnostics.push({ id: `ADIF-DEPRECATED-MODE-${record.id}`, severity: "warning", code: "ADIF-DEPRECATED-MODE", message: `${mode} should be exported as MODE ${replacement.mode}${replacement.submode ? ` with SUBMODE ${replacement.submode}` : ""}.`, lineId: record.id, lineNumber, field: "MODE", category: "conformance", suggestion: "Preview the modern mode migration." }); }
+    const prop = adifValue(record, "PROP_MODE").toUpperCase(), sat = adifValue(record, "SAT_NAME");
+    if (prop === "SAT" && !sat) push(diagnostics, "error", "ADIF-SAT-NAME", "SAT_NAME is required when PROP_MODE is SAT.", record.id, lineNumber, "SAT_NAME");
+    if (sat && prop !== "SAT") push(diagnostics, "error", "ADIF-SAT-PROP", "PROP_MODE must be SAT when SAT_NAME is present.", record.id, lineNumber, "PROP_MODE");
   });
   return diagnostics;
 }

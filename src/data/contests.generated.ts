@@ -1,7 +1,7 @@
 // Generated from recovered Templates.dll resources. Do not edit by hand.
 export const recoveredData = {
   "cabrilloVersion": "3.0",
-  "adifVersion": "3.1.6",
+  "adifVersion": "3.1.7",
   "checkerContests": [
     "GENERIC-CONTEST",
     "9A-CW",
