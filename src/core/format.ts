@@ -6,7 +6,9 @@ export function detectFormat(source: string, fileName = ""): LogFormat {
   if (/^\s*START-OF-LOG\s*:/im.test(sample) || /^\s*(?:QSO|X-QSO):/im.test(sample)) {
     return "cabrillo";
   }
+  if (/^\s*\[REG1TEST;[^\]]+\]/im.test(sample) || /^\s*\[QSORecords;\d+\]/im.test(sample)) return "edi";
   if (/<(?:ADIF_VER|EOH|CALL|QSO_DATE|EOR)(?::|>)/i.test(sample)) return "adif";
+  if (extension === "edi") return "edi";
   if (extension === "adi" || extension === "adif") return "adif";
   if (extension === "cbr" || extension === "cab" || extension === "log") return "cabrillo";
   return "text";
@@ -20,9 +22,12 @@ export function decodeLogFile(buffer: ArrayBuffer): { text: string; encoding: st
   if (bytes[0] === 0xff && bytes[1] === 0xfe) {
     return { text: new TextDecoder("utf-16le").decode(bytes.slice(2)), encoding: "UTF-16 LE" };
   }
-  const utf8 = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  const replacementRatio = [...utf8].filter((char) => char === "�").length / Math.max(utf8.length, 1);
-  if (replacementRatio < 0.001) return { text: utf8, encoding: "UTF-8" };
+  try {
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), encoding: "UTF-8" };
+  } catch {
+    // Legacy contest loggers commonly emit Windows code-page text without a
+    // declaration. A single invalid UTF-8 byte is enough to require fallback.
+  }
   return {
     text: new TextDecoder("windows-1252").decode(bytes),
     encoding: "Windows-1252",

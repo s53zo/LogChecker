@@ -22,6 +22,7 @@ import { CallsignDatabase } from "./core/callsigns";
 import { geography } from "./core/geography";
 import { adifToCabrillo, cabrilloToAdif, defaultAdifToCabrilloTarget, defaultCabrilloToAdifTarget, documentToCsv, type ConversionResult } from "./core/converter";
 import { decodeLogFile, detectFormat } from "./core/format";
+import { EDI_MODE_NAMES, EDI_QSO_FIELDS, ediField, ediHeader, ediToAdif, ediToCsv, parseEdi, serializeEdi, updateEdiHeader, updateEdiRecord } from "./core/edi";
 import { addMinimalCabrilloHeader, applyHeaderTemplate, deleteHeaderTemplate, extractHeaderTemplate, loadHeaderTemplates, removeCabrilloHeader, saveHeaderTemplate } from "./core/header-templates";
 import { bandFromFrequency } from "./core/radio";
 import { paperQsoColumns, validatePaperQso } from "./core/paper";
@@ -76,11 +77,12 @@ import type {
   AdifDocument,
   CabrilloDocument,
   Diagnostic,
+  EdiDocument,
   LogDocument,
   RepairChange,
   ScoreResult,
 } from "./core/types";
-import { validateAdif, validateCabrillo } from "./core/validator";
+import { validateAdif, validateCabrillo, validateEdi } from "./core/validator";
 
 type View = "open" | "header" | "qsos" | "problems" | "repair" | "search" | "convert" | "score" | "statistics" | "export";
 type ReferenceDataStatus = "bundled" | "idle" | "loading" | "online" | "local" | "error";
@@ -99,7 +101,7 @@ interface AppState {
   score: ScoreResult | null;
   ruleId: string;
   paperOpen: boolean;
-  conversion: { type: "adif" | "cabrillo" | "csv"; result: ConversionResult } | null;
+  conversion: { type: "adif" | "cabrillo" | "edi" | "csv"; result: ConversionResult } | null;
   stationCall: string;
   conversionContest: string;
   callbookName: string;
@@ -312,6 +314,7 @@ const escapeHtml = (input: unknown): string => String(input ?? "")
 function sourceOf(documentValue: LogDocument): string {
   if (documentValue.format === "cabrillo") return serializeCabrillo(documentValue);
   if (documentValue.format === "adif") return serializeAdif(documentValue);
+  if (documentValue.format === "edi") return serializeEdi(documentValue);
   return documentValue.source;
 }
 
@@ -319,6 +322,7 @@ function parseSource(source: string, fileName = state.fileName): LogDocument {
   const format = detectFormat(source, fileName);
   if (format === "cabrillo") return parseCabrillo(source);
   if (format === "adif") return parseAdif(source);
+  if (format === "edi") return parseEdi(source);
   return { format: "text", source };
 }
 
@@ -327,11 +331,15 @@ function diagnosticsFor(documentValue: LogDocument): Diagnostic[] {
     ? validateCabrillo(documentValue)
     : documentValue.format === "adif"
       ? validateAdif(documentValue)
-      : [{ id: "text-format", severity: "info", code: "TEXT", message: "Plain text is open. Use the raw editor to prepare Cabrillo or ADIF content." } satisfies Diagnostic];
+      : documentValue.format === "edi"
+        ? validateEdi(documentValue)
+        : [{ id: "text-format", severity: "info", code: "TEXT", message: "Plain text is open. Use the raw editor to prepare Cabrillo, ADIF, or REG1TEST EDI content." } satisfies Diagnostic];
   if (!callbook.size || documentValue.format === "text") return base;
   const calls = documentValue.format === "cabrillo"
     ? documentValue.lines.filter((line) => line.qso?.call).map((line) => ({ id: line.id, line: line.lineNumber, call: line.qso!.call }))
-    : documentValue.records.map((record, index) => ({ id: record.id, line: index + 1, call: adifValue(record, "CALL") })).filter((item) => item.call);
+    : documentValue.format === "adif"
+      ? documentValue.records.map((record, index) => ({ id: record.id, line: index + 1, call: adifValue(record, "CALL") })).filter((item) => item.call)
+      : documentValue.records.map((record) => ({ id: record.id, line: record.lineNumber, call: ediField(record, "CALL") })).filter((item) => item.call);
   for (const item of calls) {
     if (!callbook.has(item.call)) base.push({ id: `master-${item.id}`, severity: "info", code: "MASTER-NOT-FOUND", message: `${item.call} was not found in the loaded local callsign list. This is only an advisory.`, lineId: item.id, lineNumber: item.line, field: "CALL" });
   }
@@ -361,6 +369,8 @@ function setDocument(documentValue: LogDocument, options: { history?: boolean; t
   if (documentValue.format === "cabrillo") {
     state.stationCall = documentValue.lines.find((line) => line.key === "CALLSIGN")?.value ?? state.stationCall;
     state.conversionContest = documentValue.contest;
+  } else if (documentValue.format === "edi") {
+    state.stationCall = ediHeader(documentValue, "PCall") || state.stationCall;
   }
   saveDraft({ fileName: state.fileName, source: sourceOf(documentValue), savedAt: new Date().toISOString() });
   render();
@@ -388,7 +398,7 @@ function loadSource(source: string, fileName: string, encoding = "UTF-8"): void 
 function qsoCount(): number {
   if (!state.document) return 0;
   if (state.document.format === "cabrillo") return state.document.lines.filter((line) => line.qso).length;
-  if (state.document.format === "adif") return state.document.records.length;
+  if (state.document.format === "adif" || state.document.format === "edi") return state.document.records.length;
   return 0;
 }
 
@@ -423,7 +433,7 @@ function shell(content: string): string {
         <button class="btn ghost" data-action="undo" ${!(state.undo.length || state.tableUndo.length) ? "disabled" : ""} title="Undo (Ctrl+Z)">Undo</button>
         <button class="btn ghost" data-action="redo" ${!(state.redo.length || state.tableRedo.length) ? "disabled" : ""} title="Redo (Ctrl+Y)">Redo</button>
         <button class="btn primary" data-action="choose-file">Open file</button>
-        <input id="file-input" class="hidden" type="file" accept=".log,.cbr,.cab,.adi,.adif,.txt,text/plain" />
+        <input id="file-input" class="hidden" type="file" accept=".log,.cbr,.cab,.adi,.adif,.edi,.txt,text/plain" />
         <input id="callbook-input" class="hidden" type="file" accept=".dta,.txt,text/plain" />
         <input id="cty-input" class="hidden" type="file" accept=".dat,.txt,text/plain" />
         <input id="adif-merge-input" class="hidden" type="file" accept=".adi,.adif,text/plain" multiple />
@@ -433,7 +443,7 @@ function shell(content: string): string {
       <aside class="sidebar" aria-label="Workflow">
         <div class="file-card"><p class="eyebrow">Current log</p><div class="file-name" title="${escapeHtml(state.fileName)}">${escapeHtml(state.fileName)}</div><div class="file-meta">${state.document ? `${state.document.format.toUpperCase()} · ${qsoCount()} QSOs · ${escapeHtml(state.encoding || "text")}` : "Files stay on this device"}</div></div>
         <nav class="nav-list">${views.map((view) => `<button class="nav-button ${state.view === view.id ? "active" : ""}" data-view="${view.id}" ${!state.document && view.id !== "open" ? "disabled" : ""}><span>${view.label}</span>${navCount(view.id) ? `<span class="nav-number">${navCount(view.id)}</span>` : ""}</button>`).join("")}</nav>
-        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6<br />No uploads. No telemetry.</div>
+        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6 · REG1TEST EDI<br />No uploads. No telemetry.</div>
       </aside>
       <main id="main-content" class="main" tabindex="-1">${content}</main>
     </div>
@@ -446,9 +456,9 @@ function emptyView(): string {
   return `<section class="empty-workspace">
     <div class="drop-zone card" data-drop-zone>
       <div><div class="drop-icon" aria-hidden="true">QSO:</div><p class="eyebrow">Local log workshop</p><h2>Bring a contest log back into shape.</h2>
-      <p>Open a Cabrillo or ADIF file to inspect every contact, find structural problems, preview safe repairs, convert formats and calculate a transparent score.</p>
+      <p>Open a Cabrillo, ADIF, or IARU Region 1 EDI file to inspect every contact, find structural problems, preview safe repairs, and convert formats.</p>
       <div class="button-row" style="justify-content:center"><button class="btn primary" data-action="choose-file">Choose a log</button><button class="btn" data-action="sample">Try a sample</button>${draft ? `<button class="btn ghost" data-action="restore-draft">Restore local draft</button>` : ""}</div>
-      <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADIF</span><span class="format-pill">.TXT</span></div></div>
+      <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADIF</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
     </div>
     ${referenceDataPanel()}
   </section>`;
@@ -525,10 +535,24 @@ function adifHeaderView(documentValue: AdifDocument): string {
     <section class="card"><div class="card-head"><h3>Cabrillo defaults</h3></div><div class="card-body stack"><label class="field"><span>Station callsign</span><input id="station-call" class="input" value="${escapeHtml(state.stationCall)}" /></label><label class="field"><span>Contest</span><input id="conversion-contest" class="input" list="contest-list" value="${escapeHtml(state.conversionContest)}" /></label><datalist id="contest-list">${contestNames.map((name) => `<option value="${escapeHtml(name)}"></option>`).join("")}</datalist><p class="help-text">These settings stay in this browser and do not modify the ADIF records.</p></div></section></div>`;
 }
 
+function ediHeaderView(documentValue: EdiDocument): string {
+  const fields: Array<[string, string]> = [
+    ["TName", "Contest name"], ["TDate", "Contest dates"], ["PCall", "Station callsign"], ["PWWLo", "Station locator"],
+    ["PExch", "Sent exchange"], ["PSect", "Section"], ["PBand", "Band"], ["PClub", "Club"],
+    ["RName", "Responsible operator"], ["RCall", "Responsible callsign"], ["MOpe1", "Operators 1"], ["MOpe2", "Operators 2"],
+    ["SPowe", "Power (W)"], ["SAnte", "Antenna"], ["SAntH", "Antenna heights"], ["CQSOs", "Claimed QSOs"],
+    ["CQSOP", "Claimed QSO points"], ["CToSc", "Claimed total score"], ["CODXC", "Best DX"],
+  ];
+  const unknown = documentValue.lines.filter((line) => line.type === "header" && line.key && !fields.some(([key]) => key.toUpperCase() === line.key!.toUpperCase()));
+  return `${pageHead("REG1TEST EDI header", "European VHF contest entry", "Header values update in place. Unknown keys, remarks, line endings, and record fields remain attached to the original document.")}
+    <section class="card"><div class="card-head"><h3>REG1TEST fields</h3><span class="format-pill">Version ${escapeHtml(documentValue.version || "unknown")}</span></div><div class="card-body"><div class="field-grid three">${fields.map(([key, label]) => `<label class="field"><span>${escapeHtml(label)} · ${escapeHtml(key)}</span><input class="input" data-edi-header-key="${escapeHtml(key)}" value="${escapeHtml(ediHeader(documentValue, key))}" /></label>`).join("")}</div>${unknown.length ? `<p class="help-text" style="margin-top:1rem">${unknown.length} additional header field${unknown.length === 1 ? " is" : "s are"} preserved and editable in Raw source: ${escapeHtml(unknown.map((line) => line.key).join(", "))}.</p>` : ""}</div></section>`;
+}
+
 function headerView(): string {
   if (!state.document) return emptyView();
   if (state.document.format === "cabrillo") return cabrilloHeaderView(state.document);
   if (state.document.format === "adif") return adifHeaderView(state.document);
+  if (state.document.format === "edi") return ediHeaderView(state.document);
   return `${pageHead("Header", "Plain text has no structured header", "Use the raw editor to add START-OF-LOG or ADIF tags, then apply the changes.")}${rawEditor()}`;
 }
 
@@ -557,6 +581,12 @@ function adifQsoTable(documentValue: AdifDocument): string {
   return `<div class="table-wrap"><table class="data-table"><thead><tr><th>#</th>${fields.map((field) => `<th>${field.replaceAll("_", " ")}</th>`).join("")}</tr></thead><tbody>${records.map((record, index) => `<tr id="row-${escapeHtml(record.id)}" class="${state.selectedId === record.id ? "selected" : ""} ${rowHasError(record.id) ? "has-error" : ""}"><td class="line-no">${index + 1}</td>${fields.map((field) => `<td><input class="cell-input" aria-label="${field} record ${index + 1}" data-adif-id="${escapeHtml(record.id)}" data-adif-field="${field}" value="${escapeHtml(adifValue(record, field))}" /></td>`).join("")}</tr>`).join("")}</tbody></table></div>${documentValue.records.length > records.length ? `<p class="help-text">Showing the first ${records.length.toLocaleString()} of ${documentValue.records.length.toLocaleString()} records for responsiveness. Other workflows still process the full file.</p>` : ""}`;
 }
 
+function ediQsoTable(documentValue: EdiDocument): string {
+  const fields = ["DATE", "TIME", "CALL", "MODE_CODE", "RST_SENT", "QSO_SENT", "RST_RCVD", "QSO_RCVD", "EXCHANGE_RCVD", "WWL_RCVD", "QSO_POINTS", "NEW_EXCHANGE", "NEW_WWL", "NEW_DXCC", "DUPLICATE"] as const;
+  const records = documentValue.records.slice(0, 1_000);
+  return `<div class="table-wrap"><table class="data-table" aria-label="REG1TEST EDI QSO records"><thead><tr><th>Line</th>${fields.map((field) => `<th>${escapeHtml(field.replaceAll("_", " "))}</th>`).join("")}</tr></thead><tbody>${records.map((record) => `<tr id="row-${escapeHtml(record.id)}" class="${state.selectedId === record.id ? "selected" : ""} ${rowHasError(record.id) ? "has-error" : ""}"><td class="line-no">${record.lineNumber}</td>${fields.map((field) => `<td><input class="cell-input" aria-label="${escapeHtml(`${field} line ${record.lineNumber}`)}" data-edi-id="${escapeHtml(record.id)}" data-edi-field="${escapeHtml(field)}" value="${escapeHtml(ediField(record, field))}" ${field === "MODE_CODE" ? `title="${escapeHtml(EDI_MODE_NAMES[ediField(record, field)] ?? "Unknown mode")}"` : ""} /></td>`).join("")}</tr>`).join("")}</tbody></table></div>${documentValue.records.length > records.length ? `<p class="help-text">Showing the first ${records.length.toLocaleString()} of ${documentValue.records.length.toLocaleString()} records. Validation and exports still process the full log.</p>` : ""}`;
+}
+
 function paperLogger(): string {
   if (!state.paperOpen || state.document?.format !== "cabrillo") return "";
   const columns = paperQsoColumns(state.document);
@@ -576,7 +606,7 @@ function paperLogger(): string {
 function qsosView(): string {
   if (!state.document) return emptyView();
   const actions = state.document.format === "cabrillo" ? `<button class="btn primary" data-action="toggle-paper">${state.paperOpen ? "Close paper logger" : "Add paper QSO"}</button>` : "";
-  const table = state.document.format === "cabrillo" ? cabrilloQsoTable(state.document) : state.document.format === "adif" ? adifQsoTable(state.document) : rawEditor();
+  const table = state.document.format === "cabrillo" ? cabrilloQsoTable(state.document) : state.document.format === "adif" ? adifQsoTable(state.document) : state.document.format === "edi" ? ediQsoTable(state.document) : rawEditor();
   const qtcTable = state.document.format === "cabrillo" ? cabrilloQtcTable(state.document) : "";
   return `${pageHead("Structured log", `${qsoCount()} contact${qsoCount() === 1 ? "" : "s"}`, "Edit fields directly. Original unknown content remains attached to the source document.", actions)}${paperLogger()}<section class="card"><div class="card-head"><h3>QSO records</h3><span class="help-text">Pink rows contain an error</span></div><div class="card-body">${table}</div></section>${qtcTable}`;
 }
@@ -592,7 +622,7 @@ function problemsView(): string {
 
 function repairView(): string {
   if (!state.document) return emptyView();
-  if (state.document.format !== "cabrillo") return `${pageHead("Repair", "Cabrillo Doctor tools", "Fixed-column realignment applies to Cabrillo logs. ADIF fields can be edited directly in the QSO table.")}<div class="status-banner info"><span>i</span><div><strong>No Cabrillo repair preview</strong><br />Convert this log to Cabrillo first or edit its ADIF fields directly.</div></div>`;
+  if (state.document.format !== "cabrillo") return `${pageHead("Repair", "Cabrillo Doctor tools", "Fixed-column realignment applies to Cabrillo logs. ADIF and EDI fields can be edited directly in the QSO table.")}<div class="status-banner info"><span>i</span><div><strong>No Cabrillo repair preview</strong><br />This format has no fixed-column Cabrillo repairs; edit its structured fields or raw source directly.</div></div>`;
   const transformation = state.transformation;
   const selectedLabel = state.selectedRows.length ? `${state.selectedRows.length} selected QSO${state.selectedRows.length === 1 ? "" : "s"}` : "all QSOs";
   return `${pageHead("Cabrillo Doctor", state.repairs.length ? `${state.repairs.length} proposed automatic line change${state.repairs.length === 1 ? "" : "s"}` : "No automatic repairs proposed", "Preview every automatic or manual transformation before applying it.", state.repairs.length ? `<button class="btn primary" data-action="apply-repairs">Apply automatic repairs</button>` : "")}
@@ -675,9 +705,11 @@ function statisticsView(): string {
     <section class="card" style="margin-top:1rem"><div class="card-head"><h3>Country and continent totals</h3><span class="help-text">Resolved locally from the recovered DXCC table; treat as assistance</span></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>Country</th><th>Continent</th><th>QSOs</th><th>Points</th></tr></thead><tbody>${score.byCountry.map((row) => `<tr><td>${escapeHtml(row.country)}</td><td>${escapeHtml(row.continent || "—")}</td><td>${row.qsos}</td><td>${row.points}</td></tr>`).join("")}</tbody></table></div></div></section>`;
 }
 
-function buildConversion(type: "adif" | "cabrillo" | "csv"): ConversionResult | null {
+function buildConversion(type: "adif" | "cabrillo" | "edi" | "csv"): ConversionResult | null {
   if (!state.document) return null;
-  if (type === "csv" && state.document.format !== "text") return documentToCsv(state.document, state.csvDelimiter);
+  if (type === "csv" && state.document.format === "edi") return ediToCsv(state.document, state.csvDelimiter);
+  if (type === "csv" && (state.document.format === "cabrillo" || state.document.format === "adif")) return documentToCsv(state.document, state.csvDelimiter);
+  if (type === "adif" && state.document.format === "edi") return ediToAdif(state.document);
   if (type === "adif" && state.document.format === "cabrillo") return cabrilloToAdif(state.document, { fieldMap: state.cabrilloToAdifMap });
   if (type === "adif" && state.document.format === "adif") return { content: serializeAdifWithOptions(state.document, state.adifOptions), warnings: [], records: state.document.records.length };
   if (type === "cabrillo" && state.document.format === "adif") return adifToCabrillo(state.document, state.stationCall, state.conversionContest, { fieldMap: state.adifToCabrilloMap });
@@ -686,8 +718,8 @@ function buildConversion(type: "adif" | "cabrillo" | "csv"): ConversionResult | 
 
 function exportView(): string {
   if (!state.document) return emptyView();
-  const opposite = state.document.format === "cabrillo" ? "adif" : state.document.format === "adif" ? "cabrillo" : null;
-  const currentExtension = state.document.format === "adif" ? "adi" : state.document.format === "cabrillo" ? "log" : "txt";
+  const opposite = state.document.format === "cabrillo" ? "adif" : state.document.format === "adif" ? "cabrillo" : state.document.format === "edi" ? "adif" : null;
+  const currentExtension = state.document.format === "adif" ? "adi" : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt";
   const preview = state.conversion;
   const filterPreview = state.transformation?.operationId === "filter-adif" ? state.transformation : null;
   const mappingCard = (() => {
@@ -714,7 +746,7 @@ function exportView(): string {
     ${adifTools}
     ${mappingCard}
     <div class="grid-2"><section class="card"><div class="card-head"><h3>Available outputs</h3></div><div class="card-body stack">
-      <button class="btn dark" data-action="preview-export" data-export-type="${state.document.format === "adif" ? "adif" : state.document.format === "cabrillo" ? "cabrillo" : "csv"}">Preview current ${state.document.format.toUpperCase()}</button>
+      <button class="btn dark" data-action="preview-export" data-export-type="${state.document.format === "adif" ? "adif" : state.document.format === "cabrillo" ? "cabrillo" : state.document.format === "edi" ? "edi" : "csv"}">Preview current ${state.document.format.toUpperCase()}</button>
       ${opposite ? `<button class="btn" data-action="preview-export" data-export-type="${opposite}">Convert to ${opposite.toUpperCase()}</button>` : ""}
       ${state.document.format !== "text" ? `<label class="field"><span>CSV delimiter</span><select id="csv-delimiter" class="select"><option value="," ${state.csvDelimiter === "," ? "selected" : ""}>Comma</option><option value=";" ${state.csvDelimiter === ";" ? "selected" : ""}>Semicolon</option></select></label><button class="btn" data-action="preview-export" data-export-type="csv">Create CSV table</button>` : ""}
       <p class="help-text">Current source downloads as .${currentExtension}. Converted output is intentionally canonicalized and may be lossy; keep your original file.</p>
@@ -1045,7 +1077,7 @@ app.addEventListener("click", (event) => {
     case "undo": undo(); break;
     case "redo": redo(); break;
     case "apply-raw": { const raw = document.querySelector<HTMLTextAreaElement>("#raw-source"); if (raw) setDocument(parseSource(raw.value), { toast: "Source changes applied." }); break; }
-    case "download-original": if (state.document) download(sourceOf(state.document), state.document.format === "adif" ? "adi" : state.document.format === "cabrillo" ? "log" : "txt"); break;
+    case "download-original": if (state.document) download(sourceOf(state.document), state.document.format === "adif" ? "adi" : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt"); break;
     case "toggle-nonprinting": state.showNonprinting = !state.showNonprinting; render(); break;
     case "goto-position": if (state.document) {
       const line = Number(document.querySelector<HTMLInputElement>("#goto-line")?.value ?? 1);
@@ -1232,12 +1264,12 @@ app.addEventListener("click", (event) => {
     case "download-statistics-csv": if (state.document?.format === "cabrillo" && state.score) download(activityToCsv(activityBuckets(state.document, state.score.rows, state.statisticsInterval, { start: state.statisticsStart || undefined, end: state.statisticsEnd || undefined })), "activity.csv"); break;
     case "download-statistics-svg": if (state.document?.format === "cabrillo" && state.score) download(activityChartSvg(activityBuckets(state.document, state.score.rows, state.statisticsInterval, { start: state.statisticsStart || undefined, end: state.statisticsEnd || undefined }), `${state.document.contest} activity`), "activity.svg"); break;
     case "preview-export": {
-      const type = target.dataset.exportType as "adif" | "cabrillo" | "csv";
+      const type = target.dataset.exportType as "adif" | "cabrillo" | "edi" | "csv";
       const result = buildConversion(type);
       if (result) { state.conversion = { type, result }; render(); }
       break;
     }
-    case "download-preview": if (state.conversion) download(state.conversion.result.content, state.conversion.type === "adif" ? "adi" : state.conversion.type === "cabrillo" ? "log" : "csv"); break;
+    case "download-preview": if (state.conversion) download(state.conversion.result.content, state.conversion.type === "adif" ? "adi" : state.conversion.type === "cabrillo" ? "log" : state.conversion.type === "edi" ? "edi" : "csv"); break;
     case "clear-draft": clearDraft(); toast("Local draft removed."); break;
   }
 });
@@ -1335,9 +1367,11 @@ app.addEventListener("change", async (event) => {
     toast(`${files.length} ADIF file${files.length === 1 ? "" : "s"} prepared for merge.`);
   }
   if (target.dataset.headerKey && state.document?.format === "cabrillo") setDocument(updateHeader(state.document, target.dataset.headerKey, target.value), { toast: `${target.dataset.headerKey} updated.` });
+  if (target.dataset.ediHeaderKey && state.document?.format === "edi") setDocument(updateEdiHeader(state.document, target.dataset.ediHeaderKey, target.value), { toast: `${target.dataset.ediHeaderKey} updated.` });
   if (target.dataset.qsoId && target.dataset.qsoField && state.document?.format === "cabrillo") setDocument(updateQsoCell(state.document, target.dataset.qsoId, target.dataset.qsoField, target.value.toUpperCase()));
   if (target.dataset.qtcId && target.dataset.qtcField && state.document?.format === "cabrillo") setDocument(updateQtcCell(state.document, target.dataset.qtcId, target.dataset.qtcField, target.value.toUpperCase()));
   if (target.dataset.adifId && target.dataset.adifField && state.document?.format === "adif") setDocument(updateAdifTag(state.document, target.dataset.adifId, target.dataset.adifField, target.value));
+  if (target.dataset.ediId && target.dataset.ediField && state.document?.format === "edi") setDocument(updateEdiRecord(state.document, target.dataset.ediId, target.dataset.ediField as typeof EDI_QSO_FIELDS[number], target.value.toUpperCase()));
   if (target.dataset.scoreId && target.dataset.scoreField && state.document?.format === "cabrillo") {
     const current = state.scoreOverrides[target.dataset.scoreId] ?? {};
     state.scoreOverrides[target.dataset.scoreId] = target.dataset.scoreField === "points" ? { ...current, points: Number(target.value) } : { ...current, multiplier: target.value };

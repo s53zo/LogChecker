@@ -3,7 +3,8 @@ import { bandFromFrequency, isPlausibleCallsign } from "./radio";
 import { geography } from "./geography";
 import { isFixedWidthQso } from "./cabrillo";
 import { isWaedcEuropean } from "./waedc";
-import type { AdifDocument, CabrilloDocument, Diagnostic } from "./types";
+import { EDI_MODE_NAMES, EDI_QSO_FIELDS, ediField, ediHeader } from "./edi";
+import type { AdifDocument, CabrilloDocument, Diagnostic, EdiDocument } from "./types";
 
 function validDate(value: string): boolean {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -63,6 +64,54 @@ export function validateCabrillo(document: CabrilloDocument): Diagnostic[] {
     else if (qso.call) seen.set(duplicateKey, line.lineNumber);
   }
   if (/^DARC-WAEDC-(?:CW|SSB|RTTY)$/.test(document.contest)) validateWaedcQtcs(document, diagnostics);
+  return diagnostics;
+}
+
+function validCompactDate(value: string): boolean {
+  if (!/^\d{6}$/.test(value)) return false;
+  const year = Number(value.slice(0, 2)) >= 70 ? `19${value.slice(0, 2)}` : `20${value.slice(0, 2)}`;
+  const iso = `${year}-${value.slice(2, 4)}-${value.slice(4, 6)}`;
+  const date = new Date(`${iso}T00:00:00Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === iso;
+}
+
+function isPlausibleEdiCall(value: string): boolean {
+  const call = value.trim().toUpperCase();
+  return call.length >= 3 && call.length <= 14 && /[A-Z]/.test(call) && /\d/.test(call) && /^[A-Z0-9]+(?:\/[A-Z0-9]+)*$/.test(call);
+}
+
+export function validateEdi(document: EdiDocument): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const signature = document.lines.find((line) => line.type !== "blank");
+  if (signature?.type !== "signature") push(diagnostics, "error", "EDI-SIGNATURE", "The first content line must be [REG1TEST;1].", signature?.id, signature?.lineNumber);
+  else if (document.version !== "1") push(diagnostics, "warning", "EDI-VERSION", `REG1TEST version “${document.version}” is not the documented version 1.`, signature.id, signature.lineNumber);
+  const recordsMarker = document.lines.find((line) => line.type === "records-marker");
+  if (!recordsMarker) push(diagnostics, "error", "EDI-RECORDS-MARKER", "[QSORecords;count] is missing.");
+  if (document.declaredRecords !== null && document.declaredRecords !== document.records.length) push(diagnostics, "error", "EDI-RECORD-COUNT", `[QSORecords] declares ${document.declaredRecords} records, but ${document.records.length} follow.`, recordsMarker?.id, recordsMarker?.lineNumber);
+  for (const key of ["TName", "TDate", "PCall", "PWWLo", "PBand"]) {
+    if (!ediHeader(document, key).trim()) push(diagnostics, "error", "EDI-HEADER-REQUIRED", `${key} is required by REG1TEST.`, document.lines.find((line) => line.key === key)?.id, document.lines.find((line) => line.key === key)?.lineNumber, key);
+  }
+  const dates = ediHeader(document, "TDate").split(";");
+  if (dates.length !== 2 || dates.some((date) => !/^\d{8}$/.test(date))) push(diagnostics, "error", "EDI-CONTEST-DATE", "TDate must contain YYYYMMDD;YYYYMMDD.", document.lines.find((line) => line.key === "TDate")?.id, document.lines.find((line) => line.key === "TDate")?.lineNumber, "TDate");
+  if (!isPlausibleEdiCall(ediHeader(document, "PCall"))) push(diagnostics, "warning", "EDI-STATION-CALL", "PCall looks like an unusual callsign.", document.lines.find((line) => line.key === "PCall")?.id, document.lines.find((line) => line.key === "PCall")?.lineNumber, "PCall");
+  if (!/^[A-R]{2}\d{2}(?:[A-X]{2})?(?:\d{2})?$/i.test(ediHeader(document, "PWWLo"))) push(diagnostics, "error", "EDI-STATION-WWL", "PWWLo must be a 4, 6, or 8 character Maidenhead locator.", document.lines.find((line) => line.key === "PWWLo")?.id, document.lines.find((line) => line.key === "PWWLo")?.lineNumber, "PWWLo");
+
+  for (const record of document.records) {
+    const error = (code: string, message: string, field: typeof EDI_QSO_FIELDS[number], severity: Diagnostic["severity"] = "error") => push(diagnostics, severity, code, message, record.id, record.lineNumber, field);
+    if (record.fields.length < EDI_QSO_FIELDS.length) error("EDI-FIELD-COUNT", `QSO record has ${record.fields.length} fields; ${EDI_QSO_FIELDS.length} are required.`, "DATE");
+    if (!validCompactDate(ediField(record, "DATE"))) error("EDI-QSO-DATE", `Date “${ediField(record, "DATE") || "empty"}” is not YYMMDD.`, "DATE");
+    if (!/^(?:[01]\d|2[0-3])[0-5]\d$/.test(ediField(record, "TIME"))) error("EDI-QSO-TIME", `Time “${ediField(record, "TIME") || "empty"}” is not HHMM UTC.`, "TIME");
+    const call = ediField(record, "CALL");
+    if (!isPlausibleEdiCall(call)) error("EDI-QSO-CALL", `Callsign “${call || "empty"}” is not plausible.`, "CALL");
+    const mode = ediField(record, "MODE_CODE");
+    if (!(mode in EDI_MODE_NAMES)) error("EDI-QSO-MODE", `Mode code “${mode}” is outside the REG1TEST 0–9 table.`, "MODE_CODE");
+    const locator = ediField(record, "WWL_RCVD");
+    if (locator && !/^[A-R]{2}\d{2}(?:[A-X]{2})?(?:\d{2})?$/i.test(locator)) error("EDI-QSO-WWL", `Locator “${locator}” is not a 4, 6, or 8 character Maidenhead locator.`, "WWL_RCVD");
+    const points = ediField(record, "QSO_POINTS");
+    if (points && points !== "ERROR" && !/^\d{1,6}$/.test(points)) error("EDI-QSO-POINTS", `QSO points “${points}” must be numeric or ERROR.`, "QSO_POINTS");
+    for (const field of ["NEW_EXCHANGE", "NEW_WWL", "NEW_DXCC"] as const) if (ediField(record, field) && ediField(record, field) !== "N") error("EDI-QSO-FLAG", `${field} must be empty or N.`, field);
+    if (ediField(record, "DUPLICATE") && ediField(record, "DUPLICATE") !== "D") error("EDI-QSO-DUPLICATE-FLAG", "DUPLICATE must be empty or D.", "DUPLICATE");
+  }
   return diagnostics;
 }
 

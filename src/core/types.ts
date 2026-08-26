@@ -1,4 +1,4 @@
-export type LogFormat = "cabrillo" | "adif" | "text";
+export type LogFormat = "cabrillo" | "adif" | "edi" | "text";
 
 export interface ContestField {
   key: string;
@@ -101,12 +101,41 @@ export interface AdifDocument {
   unparsedTail: string;
 }
 
+export interface EdiRecord {
+  id: string;
+  lineNumber: number;
+  raw: string;
+  fields: string[];
+  dirty?: boolean;
+}
+
+export interface EdiLine {
+  id: string;
+  lineNumber: number;
+  raw: string;
+  type: "signature" | "header" | "remarks-marker" | "remark" | "records-marker" | "qso" | "footer" | "blank" | "unknown";
+  key?: string;
+  value?: string;
+  record?: EdiRecord;
+}
+
+export interface EdiDocument {
+  format: "edi";
+  source: string;
+  newline: "\n" | "\r\n" | "\r";
+  trailingNewline: boolean;
+  lines: EdiLine[];
+  records: EdiRecord[];
+  version: string;
+  declaredRecords: number | null;
+}
+
 export interface TextDocument {
   format: "text";
   source: string;
 }
 
-export type LogDocument = CabrilloDocument | AdifDocument | TextDocument;
+export type LogDocument = CabrilloDocument | AdifDocument | EdiDocument | TextDocument;
 
 export type Severity = "error" | "warning" | "info";
 
