@@ -28,7 +28,7 @@ function rawAdif(table: TableDocument): string {
     const value = row.cells[column.index] ?? "";
     return value ? `<${column.name}:${value.length}>${value}` : "";
   }).filter(Boolean).join(" ") + " <EOR>");
-  return `<ADIF_VER:5>3.1.6\n<PROGRAMID:21>CONTEST-LOG-WORKBENCH\n<EOH>\n${records.join("\n")}\n`;
+  return `<ADIF_VER:5>3.1.6\n<PROGRAMID:27>AMATEUR-RADIO-LOG-WORKBENCH\n<EOH>\n${records.join("\n")}\n`;
 }
 
 export function textTableToAdif(table: TableDocument, options: AdifExportOptions = {}): ConversionResult {
@@ -52,4 +52,3 @@ export function textTableToCsv(table: TableDocument, delimiter: "," | ";" = ",")
   const rows = table.rows.map((row) => row.cells.map((value) => quote(value, delimiter)).join(delimiter));
   return { content: `${headers}\r\n${rows.join("\r\n")}\r\n`, warnings: [], records: table.rows.length };
 }
-

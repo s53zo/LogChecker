@@ -68,6 +68,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .nav-number { min-width: 1.5rem; padding: .12rem .36rem; border-radius: 999px; color: #aebec9; background: rgb(255 255 255 / .07); font: 700 .68rem ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
 .nav-button.active .nav-number { color: #ffe2d6; background: rgb(232 104 58 / .2); }
 .sidebar-footer { margin-top: auto; padding: 1rem .5rem .25rem; color: #8195a4; font-size: .7rem; line-height: 1.5; }
+.sidebar-footer a { color: #a8deda; text-underline-offset: .16em; }
+.sidebar-footer a:hover { color: white; }
 
 .main { min-width: 0; min-height: 0; padding: 1.5rem clamp(1rem, 2.5vw, 2.3rem) 3rem; overflow: auto; }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }

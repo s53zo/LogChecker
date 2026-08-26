@@ -29,7 +29,7 @@ export function removeCabrilloHeader(document: CabrilloDocument): CabrilloDocume
 
 export function addMinimalCabrilloHeader(document: CabrilloDocument, stationCall = "N0CALL", contest = "GENERIC-CONTEST"): CabrilloDocument {
   if (document.lines.some((line) => line.key === "START-OF-LOG")) return document;
-  const header = [`START-OF-LOG: 3.0`, `CALLSIGN: ${stationCall || "N0CALL"}`, `CONTEST: ${contest || "GENERIC-CONTEST"}`, "CREATED-BY: Contest Log Workbench"];
+  const header = [`START-OF-LOG: 3.0`, `CALLSIGN: ${stationCall || "N0CALL"}`, `CONTEST: ${contest || "GENERIC-CONTEST"}`, "CREATED-BY: Amateur Radio Log Workbench"];
   const body = serializeCabrillo(document).replace(/^(?:\r\n|\r|\n)+/, "");
   return parseCabrillo(`${header.join(document.newline)}${document.newline}${body}`);
 }
@@ -54,4 +54,3 @@ export function saveHeaderTemplate(template: CabrilloHeaderTemplate): void {
 export function deleteHeaderTemplate(name: string): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(loadHeaderTemplates().filter((item) => item.name !== name)));
 }
-

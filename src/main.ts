@@ -151,7 +151,7 @@ CATEGORY-BAND: ALL
 CATEGORY-MODE: CW
 CATEGORY-POWER: LOW
 CLAIMED-SCORE: 0
-CREATED-BY: Contest Log Workbench sample
+CREATED-BY: Amateur Radio Log Workbench sample
 QSO:  7025 CW 2026-05-30 0012 S53ZO         599 001    K1ABC         599 023
 QSO: 14028 CW 2026-05-30 0117 S53ZO         599 002    DL1AAA        599 041
 QSO: 21035 CW 2026-05-30 0242 S53ZO         599 003    JA1XYZ        599 118
@@ -160,15 +160,15 @@ END-OF-LOG:
 `;
 
 const views: Array<{ id: View; label: string }> = [
-  { id: "open", label: "Open log" },
-  { id: "header", label: "Header" },
-  { id: "qsos", label: "QSOs" },
+  { id: "open", label: "Open" },
+  { id: "header", label: "Log details" },
+  { id: "qsos", label: "Contacts" },
   { id: "problems", label: "Problems" },
   { id: "repair", label: "Repair" },
   { id: "search", label: "Search" },
   { id: "convert", label: "Convert" },
+  { id: "statistics", label: "Analyze" },
   { id: "score", label: "Score" },
-  { id: "statistics", label: "Statistics" },
   { id: "export", label: "Export" },
 ];
 
@@ -430,7 +430,7 @@ function documentStatus(): string {
 function shell(content: string): string {
   return `<div class="app-shell">
     <header class="topbar">
-      <div class="brand"><div class="brand-mark" aria-hidden="true">CQ</div><div><h1>Contest Log Workbench</h1><p>Inspect · repair · convert · score</p></div></div>
+      <div class="brand"><div class="brand-mark" aria-hidden="true">QSO</div><div><h1>Amateur Radio Log Workbench</h1><p>Inspect · repair · convert · analyze · score</p></div></div>
       <div class="top-actions">
         <span class="privacy-chip"><span>Private browser processing</span></span>
         <button class="btn ghost" data-action="undo" ${!(state.undo.length || state.tableUndo.length) ? "disabled" : ""} title="Undo (Ctrl+Z)">Undo</button>
@@ -446,7 +446,7 @@ function shell(content: string): string {
       <aside class="sidebar" aria-label="Workflow">
         <div class="file-card"><p class="eyebrow">Current log</p><div class="file-name" title="${escapeHtml(state.fileName)}">${escapeHtml(state.fileName)}</div><div class="file-meta">${state.document ? `${state.document.format.toUpperCase()} · ${qsoCount()} QSOs · ${escapeHtml(state.encoding || "text")}` : "Files stay on this device"}</div></div>
         <nav class="nav-list">${views.map((view) => `<button class="nav-button ${state.view === view.id ? "active" : ""}" data-view="${view.id}" ${!state.document && view.id !== "open" ? "disabled" : ""}><span>${view.label}</span>${navCount(view.id) ? `<span class="nav-number">${navCount(view.id)}</span>` : ""}</button>`).join("")}</nav>
-        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6 · REG1TEST EDI<br />No uploads. No telemetry.</div>
+        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6 · REG1TEST EDI<br />No uploads. No telemetry.<br /><a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer">Author recommends SH6 for free online log analysis</a></div>
       </aside>
       <main id="main-content" class="main" tabindex="-1">${content}</main>
     </div>
@@ -458,11 +458,12 @@ function emptyView(): string {
   const draft = loadDraft();
   return `<section class="empty-workspace">
     <div class="drop-zone card" data-drop-zone>
-      <div><div class="drop-icon" aria-hidden="true">QSO:</div><p class="eyebrow">Local log workshop</p><h2>Bring a contest log back into shape.</h2>
-      <p>Open a Cabrillo, ADIF, or IARU Region 1 EDI file to inspect every contact, find structural problems, preview safe repairs, and convert formats.</p>
+      <div><div class="drop-icon" aria-hidden="true">QSO:</div><p class="eyebrow">Private browser toolbox</p><h2>Make more of any amateur-radio log.</h2>
+      <p>Work with Cabrillo, ADIF, IARU Region 1 EDI, or ordinary text. Inspect contacts, repair malformed records, convert formats, analyze activity, and score supported contests.</p>
       <div class="button-row" style="justify-content:center"><button class="btn primary" data-action="choose-file">Choose a log</button><button class="btn" data-action="sample">Try a sample</button>${draft ? `<button class="btn ghost" data-action="restore-draft">Restore local draft</button>` : ""}</div>
       <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADIF</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
     </div>
+    <div class="status-banner info" style="margin-top:1rem"><span>i</span><div><strong>Looking for a dedicated log analyzer?</strong><br />The author recommends <a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer">SH6</a>, a free online amateur-radio log analyzer.</div></div>
     ${referenceDataPanel()}
   </section>`;
 }
@@ -508,9 +509,9 @@ function openView(): string {
   const errors = state.diagnostics.filter((item) => item.severity === "error").length;
   const warnings = state.diagnostics.filter((item) => item.severity === "warning").length;
   return `${pageHead("Workspace", state.fileName, "A local, editable working copy. Nothing in this log is transmitted from your browser.", `<button class="btn" data-action="save-draft">Save draft</button><button class="btn danger" data-action="close-log">Close</button>`)}
-    <div class="metric-grid">${metric("Contacts", qsoCount(), "parsed QSO records")}${metric("Errors", errors, "must review")}${metric("Warnings", warnings, "contest-aware advice")}${metric("Layout", layoutName(), state.document.format === "cabrillo" ? "fixed-column template" : "record format")}</div>
+    <div class="metric-grid">${metric("Contacts", qsoCount(), "parsed QSO records")}${metric("Errors", errors, "must review")}${metric("Warnings", warnings, "format-aware advice")}${metric("Layout", layoutName(), state.document.format === "cabrillo" ? "fixed-column template" : "record format")}</div>
     <div class="grid-2"><div class="stack">${rawEditor()}</div><aside class="stack">
-      <section class="card"><div class="card-head"><h3>Readiness</h3></div><div class="card-body"><div class="status-banner ${errors ? "warning" : "success"}"><span>${errors ? "●" : "✓"}</span><div><strong>${escapeHtml(documentStatus())}</strong><br />${errors ? "Open Problems to jump directly to each affected field." : "You can continue to scoring or export."}</div></div></div></section>
+      <section class="card"><div class="card-head"><h3>Readiness</h3></div><div class="card-body"><div class="status-banner ${errors ? "warning" : "success"}"><span>${errors ? "●" : "✓"}</span><div><strong>${escapeHtml(documentStatus())}</strong><br />${errors ? "Open Problems to jump directly to each affected field." : "You can continue to analysis, conversion, scoring, or export."}</div></div></div></section>
       ${callsignAssistance()}
     </aside></div>`;
 }
@@ -603,12 +604,12 @@ function paperLogger(): string {
     const inputmode = /^(?:FREQUENCY|TIME_ON|STX|SRX)$/.test(cell.key) ? ` inputmode="numeric"` : "";
     return `<label class="field"><span>${escapeHtml(label)}</span><input class="input" name="paper-cell-${index}" data-paper-index="${index}" data-paper-key="${escapeHtml(cell.key)}" type="${type}" value="${escapeHtml(cell.value)}" maxlength="${cell.end - cell.start}" ${required ? "required" : ""}${inputmode} autocomplete="off" /></label>`;
   };
-  return `<section class="card" style="margin-bottom:1rem"><div class="card-head"><h3>Paper logger — ${escapeHtml(state.document.contest)}</h3><button class="btn ghost" data-action="toggle-paper">Close</button></div><div class="card-body"><form id="paper-form" novalidate><div class="field-grid three">${columns.map(input).join("")}</div><div id="paper-validation" class="status-banner info" aria-live="polite" style="margin-top:1rem"><span>i</span><div>Enter the worked station and contest exchange. Fields follow the active recovered Cabrillo layout.</div></div><div class="button-row" style="margin-top:1rem"><button class="btn primary" type="submit">Add QSO</button><span class="help-text">Enter validates and adds the contact; defaults advance for the next QSO.</span></div></form></div></section>`;
+  return `<section class="card" style="margin-bottom:1rem"><div class="card-head"><h3>Manual QSO entry — ${escapeHtml(state.document.contest)}</h3><button class="btn ghost" data-action="toggle-paper">Close</button></div><div class="card-body"><form id="paper-form" novalidate><div class="field-grid three">${columns.map(input).join("")}</div><div id="paper-validation" class="status-banner info" aria-live="polite" style="margin-top:1rem"><span>i</span><div>Enter the worked station and contest exchange. Fields follow the active recovered Cabrillo layout.</div></div><div class="button-row" style="margin-top:1rem"><button class="btn primary" type="submit">Add QSO</button><span class="help-text">Enter validates and adds the contact; defaults advance for the next QSO.</span></div></form></div></section>`;
 }
 
 function qsosView(): string {
   if (!state.document) return emptyView();
-  const actions = state.document.format === "cabrillo" ? `<button class="btn primary" data-action="toggle-paper">${state.paperOpen ? "Close paper logger" : "Add paper QSO"}</button>` : "";
+  const actions = state.document.format === "cabrillo" ? `<button class="btn primary" data-action="toggle-paper">${state.paperOpen ? "Close manual entry" : "Add QSO manually"}</button>` : "";
   const table = state.document.format === "cabrillo" ? cabrilloQsoTable(state.document) : state.document.format === "adif" ? adifQsoTable(state.document) : state.document.format === "edi" ? ediQsoTable(state.document) : rawEditor();
   const qtcTable = state.document.format === "cabrillo" ? cabrilloQtcTable(state.document) : "";
   return `${pageHead("Structured log", `${qsoCount()} contact${qsoCount() === 1 ? "" : "s"}`, "Edit fields directly. Original unknown content remains attached to the source document.", actions)}${paperLogger()}<section class="card"><div class="card-head"><h3>QSO records</h3><span class="help-text">Pink rows contain an error</span></div><div class="card-body">${table}</div></section>${qtcTable}`;
@@ -719,11 +720,74 @@ function bars(entries: Array<{ label: string; value: number }>): string {
   return `<div class="bar-chart">${entries.map((item) => `<div class="bar-row"><span>${escapeHtml(item.label)}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, item.value / max * 100)}%"></div></div><strong>${item.value}</strong></div>`).join("")}</div>`;
 }
 
+interface GeneralAnalysisRecord {
+  call: string;
+  date: string;
+  time: string;
+  band: string;
+  mode: string;
+  country: string;
+  qsl: string;
+}
+
+function groupedCounts(values: string[]): Array<{ label: string; value: number }> {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value || "Unknown", (counts.get(value || "Unknown") ?? 0) + 1);
+  return [...counts].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+}
+
+function generalAnalysisView(documentValue: AdifDocument | EdiDocument): string {
+  const records: GeneralAnalysisRecord[] = documentValue.format === "adif"
+    ? documentValue.records.map((record) => {
+      const call = adifValue(record, "CALL").trim().toUpperCase();
+      const frequency = adifValue(record, "FREQ");
+      return {
+        call, date: adifValue(record, "QSO_DATE"), time: adifValue(record, "TIME_ON") || adifValue(record, "TIME_OFF"),
+        band: adifValue(record, "BAND").toUpperCase() || bandFromFrequency(frequency),
+        mode: (adifValue(record, "SUBMODE") || adifValue(record, "MODE")).toUpperCase(),
+        country: geography.lookup(call)?.country ?? "Unresolved",
+        qsl: adifValue(record, "QSL_RCVD").toUpperCase() || "Not recorded",
+      };
+    })
+    : documentValue.records.map((record) => {
+      const call = ediField(record, "CALL").trim().toUpperCase();
+      return {
+        call, date: ediField(record, "DATE"), time: ediField(record, "TIME"), band: ediHeader(documentValue, "PBand") || "Unknown",
+        mode: EDI_MODE_NAMES[ediField(record, "MODE_CODE")] ?? `Mode ${ediField(record, "MODE_CODE") || "unknown"}`,
+        country: geography.lookup(call)?.country ?? "Unresolved", qsl: "Not recorded",
+      };
+    });
+  const uniqueCalls = new Set(records.map((record) => record.call).filter(Boolean)).size;
+  const seen = new Set<string>();
+  let duplicateCandidates = 0;
+  for (const record of records) {
+    const key = `${record.call}|${record.date}|${record.time}|${record.band}|${record.mode}`;
+    if (record.call && seen.has(key)) duplicateCandidates += 1;
+    seen.add(key);
+  }
+  if (documentValue.format === "edi") duplicateCandidates = Math.max(duplicateCandidates, documentValue.records.filter((record) => ediField(record, "DUPLICATE").trim().toUpperCase() === "D").length);
+  const dated = records.filter((record) => record.date).sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
+  const bands = groupedCounts(records.map((record) => record.band));
+  const modes = groupedCounts(records.map((record) => record.mode));
+  const countries = groupedCounts(records.map((record) => record.country));
+  const days = groupedCounts(records.map((record) => record.date));
+  const qsl = documentValue.format === "adif" ? groupedCounts(records.map((record) => record.qsl)) : [];
+  const table = (title: string, entries: Array<{ label: string; value: number }>, label: string) => `<section class="card"><div class="card-head"><h3>${escapeHtml(title)}</h3></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>${escapeHtml(label)}</th><th>QSOs</th></tr></thead><tbody>${entries.slice(0, 100).map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.value}</td></tr>`).join("")}</tbody></table></div></div></section>`;
+  return `${pageHead("Log analysis", "Activity and contact overview", "General statistics work without a contest rule. Country results use the active local CTY data as assistance.")}
+    <div class="metric-grid">${metric("Contacts", records.length, "all parsed records")}${metric("Unique calls", uniqueCalls, "distinct callsigns")}${metric("Duplicate candidates", duplicateCandidates, "same call, date, time, band and mode")}${metric("Date range", dated.length ? `${dated[0]!.date}–${dated.at(-1)!.date}` : "—", "first to last record")}</div>
+    <div class="grid-2"><section class="card"><div class="card-head"><h3>QSOs by band</h3></div><div class="card-body">${bars(bands.slice(0, 15))}</div></section><section class="card"><div class="card-head"><h3>QSOs by mode</h3></div><div class="card-body">${bars(modes.slice(0, 15))}</div></section></div>
+    <div class="grid-2" style="margin-top:1rem">${table("Band totals", bands, "Band")}${table("Mode totals", modes, "Mode")}</div>
+    <div class="grid-2" style="margin-top:1rem">${table("Activity by date", days, "Date")}${table("Countries", countries, "Country")}</div>
+    ${qsl.length ? `<div style="margin-top:1rem">${table("Paper QSL status", qsl, "Status")}</div>` : ""}`;
+}
+
 function statisticsView(): string {
-  if (!state.document || state.document.format !== "cabrillo" || !state.score) return `${pageHead("Statistics", "Cabrillo statistics", "Open or convert a Cabrillo log to see band and hourly activity.")}<div class="status-banner info"><span>i</span><div><strong>No Cabrillo statistics available</strong><br />The current document does not contain scored Cabrillo QSOs.</div></div>`;
+  if (!state.document) return emptyView();
+  if (state.document.format === "adif" || state.document.format === "edi") return generalAnalysisView(state.document);
+  if (state.document.format !== "cabrillo" || !state.score) return `${pageHead("Log analysis", "Map the text log first", "Assign fields in Convert to unlock structured contact analysis.")}<div class="status-banner info"><span>i</span><div><strong>Structured records are required</strong><br />The current plain-text document has no field mapping yet.</div></div>`;
   const score = state.score;
   const buckets = activityBuckets(state.document, score.rows, state.statisticsInterval, { start: state.statisticsStart || undefined, end: state.statisticsEnd || undefined });
-  return `${pageHead("Statistics", "Band and activity breakdown", "Accessible tables accompany every compact chart; counts exclude detected duplicates.", `<button class="btn" data-action="download-statistics-csv">Activity CSV</button><button class="btn" data-action="download-statistics-svg">Chart SVG</button>`)}
+  return `${pageHead("Contest analysis", "Band and activity breakdown", "Accessible tables accompany every compact chart; counts exclude detected duplicates.", `<button class="btn" data-action="download-statistics-csv">Activity CSV</button><button class="btn" data-action="download-statistics-svg">Chart SVG</button>`)}
     <section class="card" style="margin-bottom:1rem"><div class="card-head"><h3>Chart period</h3></div><div class="card-body"><div class="field-grid three"><label class="field"><span>Start date and time</span><input id="statistics-start" class="input" type="datetime-local" value="${escapeHtml(state.statisticsStart)}" /></label><label class="field"><span>End date and time</span><input id="statistics-end" class="input" type="datetime-local" value="${escapeHtml(state.statisticsEnd)}" /></label><label class="field"><span>Interval in minutes</span><select id="statistics-interval" class="select">${[15, 30, 60, 120, 240, 1440].map((value) => `<option value="${value}" ${state.statisticsInterval === value ? "selected" : ""}>${value}</option>`).join("")}</select></label></div></div></section>
     <div class="grid-2"><section class="card"><div class="card-head"><h3>QSOs by band</h3></div><div class="card-body">${bars(score.byBand.map((row) => ({ label: row.band, value: row.qsos })))}</div></section><section class="card"><div class="card-head"><h3>Points by interval</h3></div><div class="card-body">${bars(buckets.map((row) => ({ label: row.start.slice(5, 16).replace("T", " "), value: row.points })))}</div></section></div>
     <div class="grid-2" style="margin-top:1rem"><section class="card"><div class="card-head"><h3>Band totals</h3></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>Band</th><th>QSOs</th><th>Points</th><th>Multipliers</th></tr></thead><tbody>${score.byBand.map((row) => `<tr><td>${escapeHtml(row.band)}</td><td>${row.qsos}</td><td>${row.points}</td><td>${row.multipliers}</td></tr>`).join("")}</tbody></table></div></div></section><section class="card"><div class="card-head"><h3>Mode totals</h3></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>Mode</th><th>QSOs</th><th>Points</th></tr></thead><tbody>${score.byMode.map((row) => `<tr><td>${escapeHtml(row.mode)}</td><td>${row.qsos}</td><td>${row.points}</td></tr>`).join("")}</tbody></table></div></div></section></div>
@@ -814,7 +878,7 @@ function toast(message: string): void {
 }
 
 function download(content: string, extension: string): void {
-  const base = state.fileName.replace(/\.[^.]+$/, "") || "contest-log";
+  const base = state.fileName.replace(/\.[^.]+$/, "") || "radio-log";
   const suffix = extension.split(".").at(-1)?.toLowerCase();
   const mime = suffix === "csv" ? "text/csv;charset=utf-8" : suffix === "html" ? "text/html;charset=utf-8" : suffix === "svg" ? "image/svg+xml;charset=utf-8" : "text/plain;charset=utf-8";
   const blob = new Blob([content], { type: mime });
