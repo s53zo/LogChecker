@@ -6,6 +6,7 @@ import { PREFLIGHT_PROFILES, preflightReportHtml, preflightSubset, runPreflight,
 import { applyStationProfile, parseProfileStore, safeProfileFilename, splitAdif, validateStationProfile, type SplitCriterion, type StationProfile } from "./core/station-profiles";
 import { duplicateReportCsv, findDuplicateCandidates, resolveDuplicate, type DuplicateCandidate } from "./core/duplicates";
 import { fastEntryToAdif, parseFastEntry, type FastEntryResult } from "./core/fast-entry";
+import { LOG_TRANSFER_ACK_TYPE, LOG_TRANSFER_TYPE, QSL_LABEL_TOOL_ORIGIN, QSL_LABEL_TOOL_URL, isTrustedLogTransferOrigin, parseLogTransferPayload, qslReadiness, safeTransferFilename } from "./core/qsl-handoff";
 import {
   extractAdifCallsigns,
   filterAdif,
@@ -156,6 +157,7 @@ interface AppState {
   callbookSuggestions: string[];
   cabrilloToAdifMap: Record<string, string>;
   adifToCabrilloMap: Record<string, string>;
+  autoImportAdif: boolean;
 }
 
 const SAMPLE = `START-OF-LOG: 3.0
@@ -253,6 +255,7 @@ const state: AppState = {
   callbookSuggestions: [],
   cabrilloToAdifMap: savedSettings.cabrilloToAdifMap,
   adifToCabrilloMap: savedSettings.adifToCabrilloMap,
+  autoImportAdif: localStorage.getItem("log-workbench:auto-import-adif:v1") !== "false",
 };
 
 const callbook = new CallsignDatabase();
@@ -479,7 +482,7 @@ function shell(content: string): string {
       <aside class="sidebar" aria-label="Workflow">
         <div class="file-card"><p class="eyebrow">Current log</p><div class="file-name" title="${escapeHtml(state.fileName)}">${escapeHtml(state.fileName)}</div><div class="file-meta">${state.document ? `${state.document.format.toUpperCase()} · ${qsoCount()} QSOs · ${escapeHtml(state.encoding || "text")}` : "Files stay on this device"}</div></div>
         <nav class="nav-list">${views.map((view) => `<button class="nav-button ${state.view === view.id ? "active" : ""}" data-view="${view.id}" ${!state.document && view.id !== "open" ? "disabled" : ""}><span>${view.label}</span>${navCount(view.id) ? `<span class="nav-number">${navCount(view.id)}</span>` : ""}</button>`).join("")}</nav>
-        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.7 / ADX · REG1TEST EDI<br />Log data stays local. Google Analytics usage telemetry.<br /><a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">Author recommends SH6 for free online log analysis</a></div>
+        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.7 / ADX · REG1TEST EDI<br />Log data stays local. Google Analytics usage telemetry.</div>
       </aside>
       <main id="main-content" class="main" tabindex="-1">${content}</main>
     </div>
@@ -497,8 +500,13 @@ function emptyView(): string {
       <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADX</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
     </div>
     <div class="status-banner info" style="margin-top:1rem"><span>i</span><div><strong>Looking for a dedicated log analyzer?</strong><br />The author recommends <a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">SH6</a>, a free online amateur-radio log analyzer.</div></div>
+    ${onlineImportPanel()}
     ${referenceDataPanel()}
   </section>`;
+}
+
+function onlineImportPanel(): string {
+  return `<section class="card" style="margin-top:1rem" aria-label="Online ADIF import"><div class="card-head"><h3>Online ADIF handoff</h3><span class="format-pill">Browser to browser</span></div><div class="card-body stack"><label><input id="auto-import-adif" type="checkbox" ${state.autoImportAdif ? "checked" : ""} /> Automatically open ADIF sent by trusted S53ZO web tools</label><p class="help-text">Compatible tools can open this page and pass an ADIF directly between browser tabs. The log is carried in memory with <code>postMessage</code>; it is not put in the URL or uploaded to a server.</p></div></section>`;
 }
 
 function pageHead(eyebrow: string, title: string, subtitle: string, actions = ""): string {
@@ -545,6 +553,7 @@ function openView(): string {
     <div class="metric-grid">${metric("Contacts", qsoCount(), "parsed QSO records")}${metric("Errors", errors, "must review")}${metric("Warnings", warnings, "format-aware advice")}${metric("Layout", layoutName(), state.document.format === "cabrillo" ? "fixed-column template" : "record format")}</div>
     <div class="grid-2"><div class="stack">${rawEditor()}</div><aside class="stack">
       <section class="card"><div class="card-head"><h3>Readiness</h3></div><div class="card-body"><div class="status-banner ${errors ? "warning" : "success"}"><span>${errors ? "●" : "✓"}</span><div><strong>${escapeHtml(documentStatus())}</strong><br />${errors ? "Open Problems to jump directly to each affected field." : "You can continue to analysis, conversion, scoring, or export."}</div></div></div></section>
+      ${onlineImportPanel()}
       ${callsignAssistance()}
     </aside></div>`;
 }
@@ -868,6 +877,52 @@ function buildConversion(type: "adif" | "adx" | "cabrillo" | "edi" | "csv"): Con
   return { content: sourceOf(state.document), warnings: [], records: qsoCount() };
 }
 
+function qslAdifDocument(): { document: AdifDocument; content: string; warnings: string[] } | null {
+  if (!state.document || state.document.format === "text") return null;
+  const result = buildConversion("adif");
+  if (!result) return null;
+  return { document: parseAdif(result.content), content: result.content, warnings: result.warnings };
+}
+
+function qslPrintingCard(): string {
+  const prepared = qslAdifDocument();
+  if (!prepared) return "";
+  const readiness = qslReadiness(prepared.document);
+  const blocked = readiness.blocked.length;
+  const status = blocked ? `${blocked} contact${blocked === 1 ? "" : "s"} need required QSL fields` : `${readiness.ready} contact${readiness.ready === 1 ? "" : "s"} ready`;
+  return `<section class="card" style="margin-top:1rem"><div class="card-head"><h3>Prepare QSL printing</h3><span class="support-chip">${escapeHtml(status)}</span></div><div class="card-body stack"><p>Open ADIF to QSL Labels and preload this working log for label or card printing.</p>${blocked ? `<div class="status-banner warning"><span>!</span><div><strong>Complete the required fields before handoff.</strong><br />Missing CALL, QSO_DATE, time, band/frequency, or MODE in records: ${escapeHtml(readiness.blocked.slice(0, 10).map((item) => item.recordNumber).join(", "))}${blocked > 10 ? "…" : ""}.</div></div>` : `<div class="status-banner success"><span>✓</span><div><strong>The ADIF has the minimum fields used for QSL printing.</strong><br />The receiving tool still lets you filter contacts and choose the label layout.</div></div>`}${readiness.alreadySent ? `<div class="status-banner info"><span>i</span><div>${readiness.alreadySent} record${readiness.alreadySent === 1 ? " is" : "s are"} marked QSL_SENT=Y or Q. Review the receiving tool's filters before printing again.</div></div>` : ""}${prepared.warnings.map((warning) => `<div class="status-banner warning"><span>!</span><div>${escapeHtml(warning)}</div></div>`).join("")}<div class="button-row"><button class="btn primary" data-action="open-qsl-printing" ${blocked || !readiness.total ? "disabled" : ""}>Open QSL label tool</button><a class="btn ghost" href="${QSL_LABEL_TOOL_URL}" target="_blank" rel="noopener noreferrer">Open without log</a></div><p class="help-text">The handoff sends the ADIF only to the newly opened QSL-label tab. It is never included in analytics or a URL.</p></div></section>`;
+}
+
+function specialistToolsCard(): string {
+  return `<section class="card" style="margin-top:1rem"><div class="card-head"><h3>Continue with specialized tools</h3><span class="format-pill">Free online services</span></div><div class="card-body"><p class="page-subtitle">Your log is checked and prepared. Choose what you would like to do next.</p><div class="grid-2" style="margin-top:1rem"><article class="card"><div class="card-body stack"><div><p class="eyebrow">Explore your operation</p><h3>Analyze the log with SH6</h3></div><p>Discover operating patterns, charts, maps, rates, countries, bands, and other detailed log insights in the author’s free online analyzer.</p><a class="btn dark" href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">Open SH6 log analyzer</a></div></article><article class="card"><div class="card-body stack"><div><p class="eyebrow">Finish the paper workflow</p><h3>Print QSL labels and cards</h3></div><p>Turn an ADIF log into print-ready QSL labels or cards with customizable layouts, fields, filters, and PDF output.</p><a class="btn dark" href="${QSL_LABEL_TOOL_URL}" target="_blank" rel="noopener noreferrer" data-analytics="qsl_service_link">Open ADIF to QSL</a></div></article></div></div></section>`;
+}
+
+function openQslPrinting(): void {
+  const prepared = qslAdifDocument();
+  if (!prepared) { toast("Open a Cabrillo, ADIF, ADX, or EDI log first."); return; }
+  const readiness = qslReadiness(prepared.document);
+  if (!readiness.total || readiness.blocked.length) { toast("Complete the required QSL fields before sending this log."); return; }
+  const receiver = window.open(QSL_LABEL_TOOL_URL, "_blank");
+  if (!receiver) { toast("Popup blocked. Allow popups to open the QSL label tool."); return; }
+  const payload = { type: LOG_TRANSFER_TYPE, name: safeTransferFilename(state.fileName), content: prepared.content } as const;
+  let attempts = 0;
+  const timer = window.setInterval(() => {
+    attempts += 1;
+    try { receiver.postMessage(payload, QSL_LABEL_TOOL_ORIGIN); } catch { /* The target may still be loading. */ }
+    if (attempts >= 15) window.clearInterval(timer);
+  }, 350);
+  try { receiver.postMessage(payload, QSL_LABEL_TOOL_ORIGIN); } catch { /* The retry loop handles a loading target. */ }
+  const onAck = (event: MessageEvent): void => {
+    if (event.origin !== QSL_LABEL_TOOL_ORIGIN || event.source !== receiver || event.data?.type !== LOG_TRANSFER_ACK_TYPE) return;
+    window.clearInterval(timer);
+    window.removeEventListener("message", onAck);
+    toast("Log loaded in the QSL label tool.");
+  };
+  window.addEventListener("message", onAck);
+  window.setTimeout(() => window.removeEventListener("message", onAck), 8_000);
+  trackEvent("qsl_print_handoff", { document_format: state.document?.format ?? "none", record_bucket: countBucket(readiness.total), result: "opened" });
+}
+
 function exportView(): string {
   if (!state.document) return emptyView();
   const opposite = state.document.format === "cabrillo" ? "adif" : state.document.format === "adif" ? "cabrillo" : state.document.format === "edi" ? "adif" : null;
@@ -904,6 +959,8 @@ function exportView(): string {
       ${state.document.format !== "text" ? `<label class="field"><span>CSV delimiter</span><select id="csv-delimiter" class="select"><option value="," ${state.csvDelimiter === "," ? "selected" : ""}>Comma</option><option value=";" ${state.csvDelimiter === ";" ? "selected" : ""}>Semicolon</option></select></label><button class="btn" data-action="preview-export" data-export-type="csv">Create CSV table</button>` : ""}
       <p class="help-text">Current source downloads as .${currentExtension}. Converted output is intentionally canonicalized and may be lossy; keep your original file.</p>
     </div></section><section class="card"><div class="card-head"><h3>Privacy</h3></div><div class="card-body"><div class="status-banner success"><span>✓</span><div><strong>Local export</strong><br />Log contents remain on this device. Google Analytics receives only general interface usage events, never filenames, callsigns, searches, exchanges, or uploaded text.</div></div></div></section></div>
+    ${qslPrintingCard()}
+    ${specialistToolsCard()}
     ${preview ? `<section class="card" style="margin-top:1rem"><div class="card-head"><h3>${preview.type.toUpperCase()} preview · ${preview.result.records} records</h3><button class="btn primary" data-action="download-preview">Download ${preview.type.toUpperCase()}</button></div><div class="card-body">${preview.result.warnings.map((warning) => `<div class="status-banner warning" style="margin-bottom:.7rem"><span>!</span><div>${escapeHtml(warning)}</div></div>`).join("")}${preview.result.lossReport?.length ? `<div class="status-banner warning" style="margin-bottom:.7rem"><span>!</span><div><strong>Fields requiring recovery or manual mapping</strong><ul>${preview.result.lossReport.map((loss) => `<li>${escapeHtml(loss)}</li>`).join("")}</ul></div></div>` : ""}${structuredPreview}<pre class="code-preview">${escapeHtml(preview.result.content.slice(0, 24_000))}${preview.result.content.length > 24_000 ? "\n… preview truncated …" : ""}</pre></div></section>` : ""}`;
 }
 
@@ -1212,6 +1269,7 @@ app.addEventListener("click", (event) => {
   }
   switch (target.dataset.action) {
     case "choose-file": document.querySelector<HTMLInputElement>("#file-input")?.click(); break;
+    case "open-qsl-printing": openQslPrinting(); break;
     case "choose-callbook": document.querySelector<HTMLInputElement>("#callbook-input")?.click(); break;
     case "choose-cty": document.querySelector<HTMLInputElement>("#cty-input")?.click(); break;
     case "refresh-master": void refreshMasterOnline(); break;
@@ -1552,6 +1610,12 @@ app.addEventListener("change", async (event) => {
     }
   }
   if (target.id === "file-input" && target instanceof HTMLInputElement && target.files?.[0]) await openFile(target.files[0]);
+  if (target.id === "auto-import-adif" && target instanceof HTMLInputElement) {
+    state.autoImportAdif = target.checked;
+    localStorage.setItem("log-workbench:auto-import-adif:v1", String(target.checked));
+    trackEvent("online_adif_import_setting", { enabled: target.checked });
+    toast(target.checked ? "Trusted online ADIF handoff enabled." : "Online ADIF handoff disabled.");
+  }
   if (target.id === "profile-import-input" && target instanceof HTMLInputElement && target.files?.[0]) { try { const store = parseProfileStore(await target.files[0].text()); state.stationProfiles = store.profiles; state.activeProfileId = store.profiles[0]?.id ?? ""; localStorage.setItem("log-workbench:station-profiles:v1", JSON.stringify(store)); render(); toast(`${store.profiles.length} station profile${store.profiles.length === 1 ? "" : "s"} imported locally.`); } catch (error) { toast(error instanceof Error ? error.message : String(error)); } }
   if (target.id === "callbook-input" && target instanceof HTMLInputElement && target.files?.[0]) {
     masterRequestVersion += 1;
@@ -1652,6 +1716,24 @@ app.addEventListener("drop", (event) => {
   document.querySelector("[data-drop-zone]")?.classList.remove("dragging");
   const file = event.dataTransfer?.files[0];
   if (file) void openFile(file);
+});
+
+window.addEventListener("message", (event) => {
+  if (!state.autoImportAdif || !isTrustedLogTransferOrigin(event.origin, window.location.origin)) return;
+  const expectedSource = event.source === window.opener || event.source === window.parent || (event.source === window && event.origin === window.location.origin);
+  if (!expectedSource) return;
+  const payload = parseLogTransferPayload(event.data);
+  if (!payload) return;
+  try {
+    const parsed = parseAdif(payload.content);
+    if (!parsed.records.length) throw new Error("No ADIF records were found.");
+    loadSource(payload.content, payload.name, "Browser handoff");
+    trackEvent("file_open", { document_format: "adif", record_bucket: countBucket(parsed.records.length), result: "success", source_type: "browser_handoff" });
+    event.source?.postMessage({ type: LOG_TRANSFER_ACK_TYPE, name: payload.name }, { targetOrigin: event.origin });
+  } catch {
+    trackEvent("file_open", { document_format: "adif", result: "error", source_type: "browser_handoff" });
+    toast("The online ADIF handoff could not be opened.");
+  }
 });
 
 window.addEventListener("keydown", (event) => {

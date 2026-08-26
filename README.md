@@ -26,6 +26,10 @@ files can be refreshed or selected locally.
 - The duplicate workbench classifies exact, LoTW, near, possible, and
   activity-aware candidates and makes every removal or merge undoable.
 - Paper Logger includes structured entry and explicit fast-entry shorthand.
+- Trusted S53ZO browser tools can hand an ADIF directly to the workbench with
+  the optional automatic import setting. The Export screen checks the minimum
+  QSL identity fields and can preload the working log into
+  [ADIF to QSL Labels](https://s53zo.github.io/ADIF-to-QSL-label/make_qsl_labels.html).
 
 Local preflight checks cannot guarantee acceptance by an external service.
 Final LoTW signing and verification remains TQSL's responsibility.
@@ -52,6 +56,8 @@ diagnostics remain on the device. The app has no upload backend. Its only data
 requests are the visible MASTER.DTA and CTY.DAT refreshes. Google Analytics may
 receive generic feature/action names and coarse record-count buckets, but never
 filenames, callsigns, log values, profile names, searches, or free text.
+Browser-to-browser ADIF handoff uses a restricted `postMessage` origin; log
+content is never placed in a URL or analytics event.
 
 ## Extending the workbench
 
