@@ -1,4 +1,5 @@
 import "./styles.css";
+import { countBucket, trackEvent } from "./core/analytics";
 import { adifValue, parseAdif, serializeAdif, updateAdifTag } from "./core/adif";
 import {
   extractAdifCallsigns,
@@ -260,12 +261,14 @@ async function refreshMasterOnline(notifyUser = true): Promise<void> {
     state.callbookSuggestions = [];
     if (state.document) state.diagnostics = diagnosticsFor(state.document);
     render();
+    trackEvent("reference_data_refresh", { area: "master", result: "success", record_bucket: countBucket(count) });
     if (notifyUser) toast(`${count.toLocaleString()} current MASTER.DTA callsigns loaded.`);
   } catch (error) {
     if (requestVersion !== masterRequestVersion) return;
     state.masterStatus = "error";
     state.masterError = error instanceof Error ? error.message : String(error);
     render();
+    trackEvent("reference_data_refresh", { area: "master", result: "error" });
     if (notifyUser) toast("MASTER.DTA refresh failed; the existing callsign data was kept.");
   }
 }
@@ -287,12 +290,14 @@ async function refreshCtyOnline(notifyUser = true): Promise<void> {
     state.ctyError = "";
     if (state.document?.format === "cabrillo") state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides);
     render();
+    trackEvent("reference_data_refresh", { area: "cty", result: "success", record_bucket: countBucket(count) });
     if (notifyUser) toast(`${count.toLocaleString()} current CTY prefixes loaded.`);
   } catch (error) {
     if (requestVersion !== ctyRequestVersion) return;
     state.ctyStatus = "error";
     state.ctyError = error instanceof Error ? error.message : String(error);
     render();
+    trackEvent("reference_data_refresh", { area: "cty", result: "error" });
     if (notifyUser) toast("CTY.DAT refresh failed; the existing country data was kept.");
   }
 }
@@ -446,7 +451,7 @@ function shell(content: string): string {
       <aside class="sidebar" aria-label="Workflow">
         <div class="file-card"><p class="eyebrow">Current log</p><div class="file-name" title="${escapeHtml(state.fileName)}">${escapeHtml(state.fileName)}</div><div class="file-meta">${state.document ? `${state.document.format.toUpperCase()} · ${qsoCount()} QSOs · ${escapeHtml(state.encoding || "text")}` : "Files stay on this device"}</div></div>
         <nav class="nav-list">${views.map((view) => `<button class="nav-button ${state.view === view.id ? "active" : ""}" data-view="${view.id}" ${!state.document && view.id !== "open" ? "disabled" : ""}><span>${view.label}</span>${navCount(view.id) ? `<span class="nav-number">${navCount(view.id)}</span>` : ""}</button>`).join("")}</nav>
-        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6 · REG1TEST EDI<br />No uploads. No telemetry.<br /><a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer">Author recommends SH6 for free online log analysis</a></div>
+        <div class="sidebar-footer">Cabrillo 3.0 · ADIF 3.1.6 · REG1TEST EDI<br />Log data stays local. Google Analytics usage telemetry.<br /><a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">Author recommends SH6 for free online log analysis</a></div>
       </aside>
       <main id="main-content" class="main" tabindex="-1">${content}</main>
     </div>
@@ -463,7 +468,7 @@ function emptyView(): string {
       <div class="button-row" style="justify-content:center"><button class="btn primary" data-action="choose-file">Choose a log</button><button class="btn" data-action="sample">Try a sample</button>${draft ? `<button class="btn ghost" data-action="restore-draft">Restore local draft</button>` : ""}</div>
       <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADIF</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
     </div>
-    <div class="status-banner info" style="margin-top:1rem"><span>i</span><div><strong>Looking for a dedicated log analyzer?</strong><br />The author recommends <a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer">SH6</a>, a free online amateur-radio log analyzer.</div></div>
+    <div class="status-banner info" style="margin-top:1rem"><span>i</span><div><strong>Looking for a dedicated log analyzer?</strong><br />The author recommends <a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">SH6</a>, a free online amateur-radio log analyzer.</div></div>
     ${referenceDataPanel()}
   </section>`;
 }
@@ -488,7 +493,7 @@ function referenceStatusText(kind: "master" | "cty"): string {
 }
 
 function referenceDataPanel(): string {
-  return `<section class="card reference-data-panel" aria-label="Reference data status"><div class="card-head"><h3>Reference data</h3><button class="btn ghost" data-action="refresh-reference-data" ${state.masterStatus === "loading" || state.ctyStatus === "loading" ? "disabled" : ""}>Refresh both</button></div><div class="card-body reference-data-grid"><div><strong>MASTER.DTA</strong><span data-reference-status="master">${escapeHtml(state.callbookName || "MASTER.DTA")} · ${escapeHtml(referenceStatusText("master"))}</span></div><div><strong>CTY.DAT</strong><span data-reference-status="cty">${escapeHtml(state.ctyName)} · ${escapeHtml(referenceStatusText("cty"))}</span></div></div><p class="help-text reference-network-note">The app checks these public reference files with two direct GET requests. It sends no log text, filename, callsign query, or cookies; as with any web request, the data host receives the connection IP and standard request headers.</p></section>`;
+  return `<section class="card reference-data-panel" aria-label="Reference data status"><div class="card-head"><h3>Reference data</h3><button class="btn ghost" data-action="refresh-reference-data" ${state.masterStatus === "loading" || state.ctyStatus === "loading" ? "disabled" : ""}>Refresh both</button></div><div class="card-body reference-data-grid"><div><strong>MASTER.DTA</strong><span data-reference-status="master">${escapeHtml(state.callbookName || "MASTER.DTA")} · ${escapeHtml(referenceStatusText("master"))}</span></div><div><strong>CTY.DAT</strong><span data-reference-status="cty">${escapeHtml(state.ctyName)} · ${escapeHtml(referenceStatusText("cty"))}</span></div></div><p class="help-text reference-network-note">The app checks these public reference files with two direct GET requests. It sends no log text, filename, callsign query, or cookies; as with any web request, the data host receives the connection IP and standard request headers. Google Analytics records general interface usage, but custom events never include uploaded log data or user-entered values.</p></section>`;
 }
 
 function rawEditor(): string {
@@ -839,7 +844,7 @@ function exportView(): string {
       ${opposite ? `<button class="btn" data-action="preview-export" data-export-type="${opposite}">Convert to ${opposite.toUpperCase()}</button>` : ""}
       ${state.document.format !== "text" ? `<label class="field"><span>CSV delimiter</span><select id="csv-delimiter" class="select"><option value="," ${state.csvDelimiter === "," ? "selected" : ""}>Comma</option><option value=";" ${state.csvDelimiter === ";" ? "selected" : ""}>Semicolon</option></select></label><button class="btn" data-action="preview-export" data-export-type="csv">Create CSV table</button>` : ""}
       <p class="help-text">Current source downloads as .${currentExtension}. Converted output is intentionally canonicalized and may be lossy; keep your original file.</p>
-    </div></section><section class="card"><div class="card-head"><h3>Privacy</h3></div><div class="card-body"><div class="status-banner success"><span>✓</span><div><strong>Local export</strong><br />No server, cloud storage, analytics or external lookup is involved.</div></div></div></section></div>
+    </div></section><section class="card"><div class="card-head"><h3>Privacy</h3></div><div class="card-body"><div class="status-banner success"><span>✓</span><div><strong>Local export</strong><br />Log contents remain on this device. Google Analytics receives only general interface usage events, never filenames, callsigns, searches, exchanges, or uploaded text.</div></div></div></section></div>
     ${preview ? `<section class="card" style="margin-top:1rem"><div class="card-head"><h3>${preview.type.toUpperCase()} preview · ${preview.result.records} records</h3><button class="btn primary" data-action="download-preview">Download ${preview.type.toUpperCase()}</button></div><div class="card-body">${preview.result.warnings.map((warning) => `<div class="status-banner warning" style="margin-bottom:.7rem"><span>!</span><div>${escapeHtml(warning)}</div></div>`).join("")}${preview.result.lossReport?.length ? `<div class="status-banner warning" style="margin-bottom:.7rem"><span>!</span><div><strong>Fields requiring recovery or manual mapping</strong><ul>${preview.result.lossReport.map((loss) => `<li>${escapeHtml(loss)}</li>`).join("")}</ul></div></div>` : ""}${structuredPreview}<pre class="code-preview">${escapeHtml(preview.result.content.slice(0, 24_000))}${preview.result.content.length > 24_000 ? "\n… preview truncated …" : ""}</pre></div></section>` : ""}`;
 }
 
@@ -888,12 +893,19 @@ function download(content: string, extension: string): void {
   link.download = `${base}.${extension}`;
   link.click();
   URL.revokeObjectURL(url);
+  trackEvent("file_download", { format: suffix || "text", document_format: state.document?.format ?? "none" });
 }
 
 async function openFile(file: File): Promise<void> {
-  const decoded = decodeLogFile(await file.arrayBuffer());
-  loadSource(decoded.text, file.name, decoded.encoding);
-  if (decoded.warning) toast(decoded.warning);
+  try {
+    const decoded = decodeLogFile(await file.arrayBuffer());
+    loadSource(decoded.text, file.name, decoded.encoding);
+    trackEvent("file_open", { document_format: state.document?.format ?? "text", record_bucket: countBucket(qsoCount()), result: decoded.warning ? "warning" : "success", source_type: "local_file" });
+    if (decoded.warning) toast(decoded.warning);
+  } catch {
+    trackEvent("file_open", { document_format: "unknown", result: "error", source_type: "local_file" });
+    toast("The selected file could not be opened.");
+  }
 }
 
 function undo(): void {
@@ -932,6 +944,7 @@ function currentTransformationSelection(): DocumentSelection {
 
 function showTransformation(preview: TransformationPreview): void {
   state.transformation = preview;
+  trackEvent("transformation_preview", { operation: preview.operationId, change_bucket: countBucket(preview.changes.length), document_format: preview.before.format, selection: state.selectedRows.length ? "selected_rows" : "document" });
   render();
   toast(preview.changes.length ? `${preview.changes.length} proposed change${preview.changes.length === 1 ? "" : "s"}.` : "This transformation would make no changes.");
 }
@@ -958,6 +971,7 @@ function previewTableOperation(operation: string): void {
   const value = document.querySelector<HTMLInputElement>("#table-value")?.value ?? "";
   const find = document.querySelector<HTMLInputElement>("#table-find")?.value ?? "";
   const separator = document.querySelector<HTMLInputElement>("#table-separator")?.value ?? "";
+  trackEvent("table_operation_preview", { operation, selection: rows.length || columns.length ? "selection" : "document", document_format: "text" });
   let preview: TablePreview | null = null;
   if (["replace", "trim", "trim-all", "remove-alpha", "remove-numeric", "remove-symbols", "remove-left", "remove-right", "fill", "empty"].includes(operation) && !columns.length) {
     toast("Select at least one table column first.");
@@ -1077,16 +1091,21 @@ function navigateInvalid(direction: "forward" | "backward"): void {
 }
 
 app.addEventListener("click", (event) => {
-  const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action], [data-view], [data-diagnostic-id], [data-search-line], [data-search-offset], [data-table-operation]");
+  const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action], [data-view], [data-diagnostic-id], [data-search-line], [data-search-offset], [data-table-operation], [data-analytics]");
   if (!target) return;
+  const documentFormat = state.document?.format ?? "none";
+  if (target.dataset.analytics) trackEvent("outbound_link", { action: target.dataset.analytics, view: state.view, document_format: documentFormat });
+  if (target.dataset.action) trackEvent("ui_action", { action: target.dataset.action, view: state.view, document_format: documentFormat, format: target.dataset.exportType ?? "none" });
   const view = target.dataset.view as View | undefined;
-  if (view) { state.view = view; render(); return; }
+  if (view) { trackEvent("workspace_view", { view, document_format: documentFormat }); state.view = view; render(); return; }
   if (target.dataset.diagnosticId) {
+    trackEvent("diagnostic_open", { document_format: documentFormat, view: state.view });
     const item = state.diagnostics.find((candidate) => candidate.id === target.dataset.diagnosticId);
     if (item?.lineId) { state.selectedId = item.lineId; state.view = "qsos"; render(); }
     return;
   }
   if (target.dataset.searchLine) {
+    trackEvent("search_result_open", { document_format: documentFormat, view: state.view });
     const line = Number(target.dataset.searchLine);
     state.view = "open";
     render();
@@ -1101,6 +1120,7 @@ app.addEventListener("click", (event) => {
     return;
   }
   if (target.dataset.searchOffset !== undefined) {
+    trackEvent("search_result_open", { document_format: documentFormat, view: state.view });
     const start = Number(target.dataset.searchOffset);
     const end = Number(target.dataset.searchEnd ?? start);
     state.searchIndex = state.searchMatches.findIndex((match) => match.start === start && match.end === end);
@@ -1203,7 +1223,7 @@ app.addEventListener("click", (event) => {
     }
     case "add-minimal-header": if (state.document?.format === "cabrillo") setDocument(addMinimalCabrilloHeader(state.document, state.stationCall, state.conversionContest), { toast: "Minimal Cabrillo header added. Undo is available." }); break;
     case "toggle-paper": state.paperOpen = !state.paperOpen; render(); break;
-    case "apply-repairs": if (state.document?.format === "cabrillo") setDocument(applyCabrilloRepairs(state.document, state.repairs), { toast: `${state.repairs.length} repairs applied. Undo is available.` }); break;
+    case "apply-repairs": if (state.document?.format === "cabrillo") { trackEvent("repair_apply", { document_format: "cabrillo", change_bucket: countBucket(state.repairs.length) }); setDocument(applyCabrilloRepairs(state.document, state.repairs), { toast: `${state.repairs.length} repairs applied. Undo is available.` }); } break;
     case "preview-time-shift": if (state.document?.format === "cabrillo") {
       const minutes = Number(document.querySelector<HTMLInputElement>("#transform-minutes")?.value ?? 0);
       showTransformation(createShiftQsoTimeCommand(minutes).execute(state.document, currentTransformationSelection()));
@@ -1271,9 +1291,9 @@ app.addEventListener("click", (event) => {
       break;
     }
     case "cancel-transformation": state.transformation = null; render(); break;
-    case "apply-transformation": if (state.transformation) setDocument(state.transformation.after, { toast: `${state.transformation.changes.length} transformation change${state.transformation.changes.length === 1 ? "" : "s"} applied. Undo is available.` }); break;
+    case "apply-transformation": if (state.transformation) { trackEvent("transformation_apply", { operation: state.transformation.operationId, document_format: state.transformation.after.format, change_bucket: countBucket(state.transformation.changes.length) }); setDocument(state.transformation.after, { toast: `${state.transformation.changes.length} transformation change${state.transformation.changes.length === 1 ? "" : "s"} applied. Undo is available.` }); } break;
     case "find-all": if (state.document) {
-      try { state.searchMatches = findAll(state.document, currentTransformationSelection(), readSearchOptions()); state.searchIndex = state.searchMatches.length ? 0 : -1; render(); }
+      try { state.searchMatches = findAll(state.document, currentTransformationSelection(), readSearchOptions()); trackEvent("search_complete", { document_format: state.document.format, result: state.searchMatches.length ? "matches" : "no_matches", record_bucket: countBucket(state.searchMatches.length), selection: state.selectedRows.length ? "selected_rows" : "document" }); state.searchIndex = state.searchMatches.length ? 0 : -1; render(); }
       catch (error) { toast(error instanceof Error ? error.message : String(error)); }
       break;
     }
@@ -1298,6 +1318,7 @@ app.addEventListener("click", (event) => {
     }
     case "cancel-table-preview": state.tablePreview = null; render(); break;
     case "apply-table-preview": if (state.tablePreview && state.textTable) {
+      trackEvent("table_operation_apply", { operation: state.tablePreview.label, document_format: "text", change_bucket: countBucket(state.tablePreview.changes.length) });
       state.tableUndo.push(state.textTable);
       state.tableRedo = [];
       const next = state.tablePreview.after;
@@ -1340,8 +1361,8 @@ app.addEventListener("click", (event) => {
     case "apply-adif-merge": if (state.adifMerge) setDocument(state.adifMerge.document, { toast: `${state.adifMerge.document.records.length} merged ADIF records applied. Undo is available.` }); break;
     case "cancel-adif-merge": state.adifMerge = null; render(); break;
     case "download-callsigns": if (state.document?.format === "adif") download(`${extractAdifCallsigns(state.document).join("\n")}\n`, "txt"); break;
-    case "calculate-score": if (state.document?.format === "cabrillo") { state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides); render(); toast("Score recalculated."); } break;
-    case "calculate-edi-score": if (state.document?.format === "edi") { render(); toast("EDI score recalculated from the current records."); } break;
+    case "calculate-score": if (state.document?.format === "cabrillo") { state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides); trackEvent("score_recalculate", { document_format: "cabrillo", record_bucket: countBucket(state.score.qsos), result: "success" }); render(); toast("Score recalculated."); } break;
+    case "calculate-edi-score": if (state.document?.format === "edi") { const score = calculateEdiScore(state.document, state.ediScoreFormula); trackEvent("score_recalculate", { document_format: "edi", record_bucket: countBucket(score.validQsos), result: "success" }); render(); toast("EDI score recalculated from the current records."); } break;
     case "update-edi-score": if (state.document?.format === "edi") {
       const score = calculateEdiScore(state.document, state.ediScoreFormula);
       setDocument(updateEdiScoreHeaders(state.document, score), { toast: `EDI score fields updated to ${score.total.toLocaleString()}. Undo is available.` });
@@ -1361,7 +1382,7 @@ app.addEventListener("click", (event) => {
     case "preview-export": {
       const type = target.dataset.exportType as "adif" | "cabrillo" | "edi" | "csv";
       const result = buildConversion(type);
-      if (result) { state.conversion = { type, result }; render(); }
+      if (result) { trackEvent("conversion_preview", { document_format: state.document?.format ?? "none", format: type, record_bucket: countBucket(result.records), result: result.warnings.length ? "warning" : "success" }); state.conversion = { type, result }; render(); }
       break;
     }
     case "download-preview": if (state.conversion) download(state.conversion.result.content, state.conversion.type === "adif" ? "adi" : state.conversion.type === "cabrillo" ? "log" : state.conversion.type === "edi" ? "edi" : "csv"); break;
@@ -1371,6 +1392,10 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", async (event) => {
   const target = event.target as HTMLInputElement | HTMLSelectElement;
+  const editedArea = target.dataset.headerKey || target.dataset.ediHeaderKey ? "header"
+    : target.dataset.qsoId || target.dataset.qtcId || target.dataset.adifId || target.dataset.ediId ? "contact"
+      : target.dataset.scoreId ? "score" : target.dataset.conversionMap || target.dataset.columnName !== undefined ? "mapping" : "settings";
+  if (target.id !== "file-input" && target.id !== "callbook-input" && target.id !== "cty-input" && target.id !== "adif-merge-input") trackEvent("workspace_change", { area: editedArea, document_format: state.document?.format ?? "none", view: state.view });
   if (target.dataset.conversionMap && target.dataset.mapSource) {
     const source = target.dataset.mapSource.toUpperCase();
     if (target.dataset.conversionMap === "cabrillo-adif") state.cabrilloToAdifMap[source] = target.value.trim().toUpperCase();
@@ -1424,6 +1449,7 @@ app.addEventListener("change", async (event) => {
     const file = target.files[0];
     const count = callbook.loadBuffer(await file.arrayBuffer());
     if (!count) {
+      trackEvent("local_reference_file", { area: "master", result: "error" });
       toast("No valid callsigns were found; the existing local callbook was kept.");
     } else {
       state.callbookName = file.name;
@@ -1434,6 +1460,7 @@ app.addEventListener("change", async (event) => {
       state.callbookQuery = "";
       state.callbookSuggestions = [];
       if (state.document) state.diagnostics = diagnosticsFor(state.document);
+      trackEvent("local_reference_file", { area: "master", result: "success", record_bucket: countBucket(count) });
       render(); toast(`${count.toLocaleString()} local callsigns loaded.`);
     }
   }
@@ -1448,8 +1475,10 @@ app.addEventListener("change", async (event) => {
       state.ctyUpdated = new Date(file.lastModified || Date.now()).toISOString();
       state.ctyError = "";
       if (state.document?.format === "cabrillo") state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides);
+      trackEvent("local_reference_file", { area: "cty", result: "success", record_bucket: countBucket(count) });
       render(); toast(`${count.toLocaleString()} local CTY prefixes loaded.`);
     } catch (error) {
+      trackEvent("local_reference_file", { area: "cty", result: "error" });
       toast(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1458,6 +1487,7 @@ app.addEventListener("change", async (event) => {
     const documents = await Promise.all(files.map(async (file) => parseAdif(await file.text())));
     const strategy = document.querySelector<HTMLSelectElement>("#adif-merge-strategy")?.value as "keep-first" | "keep-last" | "keep-all" | undefined;
     state.adifMerge = { ...mergeAdif([state.document, ...documents], strategy ?? "keep-first"), fileNames: files.map((file) => file.name) };
+    trackEvent("adif_merge_preview", { document_format: "adif", record_bucket: countBucket(state.adifMerge.document.records.length), result: state.adifMerge.duplicates.length ? "duplicates" : "success" });
     render();
     toast(`${files.length} ADIF file${files.length === 1 ? "" : "s"} prepared for merge.`);
   }
@@ -1488,7 +1518,7 @@ app.addEventListener("change", async (event) => {
 
 app.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
-  if (form.id === "paper-form") { event.preventDefault(); addPaperQso(form); }
+  if (form.id === "paper-form") { event.preventDefault(); trackEvent("manual_qso_submit", { document_format: "cabrillo", view: state.view }); addPaperQso(form); }
 });
 
 app.addEventListener("input", (event) => {
