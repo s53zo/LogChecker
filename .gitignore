@@ -1,0 +1,15 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+.DS_Store
+
+# Authorized local recovery/reference material; keep it out of the clean-room
+# web application's source repository.
+/analysis/
+/LogCheckerSetup/
+/docs/
+/scripts/
+/tests/
+/PLAN.md
+/playwright.config.ts

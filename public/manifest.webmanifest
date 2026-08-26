@@ -1,0 +1,9 @@
+{
+  "name": "Contest Log Workbench",
+  "short_name": "Log Workbench",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3efe5",
+  "theme_color": "#101d2b",
+  "icons": []
+}
