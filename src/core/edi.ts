@@ -13,6 +13,52 @@ export const EDI_MODE_NAMES: Record<string, string> = {
   "7": "RTTY", "8": "SSTV", "9": "ATV",
 };
 
+export type EdiScoreFormula =
+  | "points"
+  | "points-plus-bonuses"
+  | "points-times-multipliers-plus-bonuses"
+  | "points-plus-bonuses-times-multipliers";
+
+export const EDI_SCORE_FORMULAS: Record<EdiScoreFormula, string> = {
+  points: "QSO points",
+  "points-plus-bonuses": "QSO points + bonuses",
+  "points-times-multipliers-plus-bonuses": "QSO points × multipliers + bonuses",
+  "points-plus-bonuses-times-multipliers": "(QSO points + bonuses) × multipliers",
+};
+
+export interface EdiScoreRow {
+  id: string;
+  lineNumber: number;
+  call: string;
+  points: number;
+  status: "counted" | "duplicate" | "error" | "incomplete";
+}
+
+export interface EdiScoreResult {
+  formula: EdiScoreFormula;
+  formulaLabel: string;
+  inferred: boolean;
+  total: number;
+  claimedTotal: number | null;
+  validQsos: number;
+  duplicates: number;
+  invalid: number;
+  qsoPoints: number;
+  newWwls: number;
+  newExchanges: number;
+  newDxccs: number;
+  wwlBonus: number;
+  exchangeBonus: number;
+  dxccBonus: number;
+  bonuses: number;
+  wwlMultiplier: number;
+  exchangeMultiplier: number;
+  dxccMultiplier: number;
+  multiplierProduct: number;
+  rows: EdiScoreRow[];
+  warnings: string[];
+}
+
 function makeId(index: number, raw: string): string {
   let hash = 2166136261;
   for (const char of raw) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
@@ -108,6 +154,104 @@ export function updateEdiRecord(document: EdiDocument, id: string, field: typeof
   const byId = new Map(records.map((record) => [record.id, record]));
   const lines = document.lines.map((line) => line.record ? { ...line, record: byId.get(line.record.id)!, raw: byId.get(line.record.id)!.raw } : line);
   return { ...document, records, lines, source: serializeEdi({ ...document, records, lines }) };
+}
+
+function finiteNumber(value: string): number | null {
+  const normalized = value.trim().replace(",", ".");
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function scoreTriple(document: EdiDocument, key: string): [number, number, number] {
+  const values = ediHeader(document, key).split(";");
+  return [finiteNumber(values[0] ?? "") ?? 0, finiteNumber(values[1] ?? "") ?? 0, finiteNumber(values[2] ?? "") ?? 1];
+}
+
+function effectiveCount(markerCount: number, declaredCount: number, label: string, warnings: string[]): number {
+  if (markerCount > 0) {
+    if (declaredCount !== markerCount) warnings.push(`${label}: ${markerCount} QSO marker${markerCount === 1 ? "" : "s"} replace the declared count of ${declaredCount}.`);
+    return markerCount;
+  }
+  if (declaredCount > 0) {
+    warnings.push(`${label}: no N marker is present in the QSO records, so the declared count of ${declaredCount} is retained.`);
+    return declaredCount;
+  }
+  return 0;
+}
+
+function scoreForFormula(formula: EdiScoreFormula, points: number, bonuses: number, multipliers: number): number {
+  if (formula === "points-plus-bonuses") return points + bonuses;
+  if (formula === "points-times-multipliers-plus-bonuses") return points * multipliers + bonuses;
+  if (formula === "points-plus-bonuses-times-multipliers") return (points + bonuses) * multipliers;
+  return points;
+}
+
+/**
+ * Recalculates REG1TEST summary values from its recorded per-QSO points and N/D flags.
+ * EDI deliberately does not prescribe a universal CToSc formula, so QSO points are
+ * never replaced with an assumed distance rule here.
+ */
+export function calculateEdiScore(document: EdiDocument, requestedFormula: EdiScoreFormula | "auto" = "auto"): EdiScoreResult {
+  const warnings: string[] = [];
+  const rows: EdiScoreRow[] = document.records.map((record) => {
+    const call = ediField(record, "CALL").trim();
+    const parsedPoints = finiteNumber(ediField(record, "QSO_POINTS"));
+    const duplicate = ediField(record, "DUPLICATE").trim().toUpperCase() === "D";
+    const error = call.toUpperCase() === "ERROR";
+    const status: EdiScoreRow["status"] = duplicate ? "duplicate" : error ? "error" : parsedPoints === null || parsedPoints <= 0 ? "incomplete" : "counted";
+    return { id: record.id, lineNumber: record.lineNumber, call: call || "—", points: parsedPoints ?? 0, status };
+  });
+  const acceptedIds = new Set(rows.filter((row) => row.status === "counted").map((row) => row.id));
+  const acceptedRecords = document.records.filter((record) => acceptedIds.has(record.id));
+  const qsoPoints = rows.filter((row) => row.status === "counted").reduce((sum, row) => sum + row.points, 0);
+  const [declaredWwls, wwlBonusEach, rawWwlMultiplier] = scoreTriple(document, "CWWLs");
+  const [declaredExchanges, exchangeBonusEach, rawExchangeMultiplier] = scoreTriple(document, "CExcs");
+  const [declaredDxccs, dxccBonusEach, rawDxccMultiplier] = scoreTriple(document, "CDXCs");
+  const markerCount = (field: "NEW_WWL" | "NEW_EXCHANGE" | "NEW_DXCC") => acceptedRecords.filter((record) => ediField(record, field).trim().toUpperCase() === "N").length;
+  const newWwls = effectiveCount(markerCount("NEW_WWL"), declaredWwls, "WWL count", warnings);
+  const newExchanges = effectiveCount(markerCount("NEW_EXCHANGE"), declaredExchanges, "Exchange count", warnings);
+  const newDxccs = effectiveCount(markerCount("NEW_DXCC"), declaredDxccs, "DXCC count", warnings);
+  const wwlBonus = newWwls * wwlBonusEach;
+  const exchangeBonus = newExchanges * exchangeBonusEach;
+  const dxccBonus = newDxccs * dxccBonusEach;
+  const bonuses = wwlBonus + exchangeBonus + dxccBonus;
+  const usableMultiplier = (value: number) => value > 0 ? value : 1;
+  const wwlMultiplier = usableMultiplier(rawWwlMultiplier);
+  const exchangeMultiplier = usableMultiplier(rawExchangeMultiplier);
+  const dxccMultiplier = usableMultiplier(rawDxccMultiplier);
+  const multiplierProduct = wwlMultiplier * exchangeMultiplier * dxccMultiplier;
+  const claimedTotal = finiteNumber(ediHeader(document, "CToSc"));
+  const candidates = Object.keys(EDI_SCORE_FORMULAS) as EdiScoreFormula[];
+  const inferredFormula = claimedTotal === null ? null : candidates.find((candidate) => scoreForFormula(candidate, qsoPoints, bonuses, multiplierProduct) === claimedTotal) ?? null;
+  const formula = requestedFormula === "auto" ? inferredFormula ?? "points" : requestedFormula;
+  if (requestedFormula === "auto" && claimedTotal !== null && !inferredFormula) warnings.push("The declared CToSc does not match a standard points/bonus/multiplier combination. QSO points are used; choose another formula if the contest rules require it.");
+  if (requestedFormula === "auto" && claimedTotal === null) warnings.push("No CToSc value is available for formula inference. QSO points are used by default.");
+  const total = scoreForFormula(formula, qsoPoints, bonuses, multiplierProduct);
+  return {
+    formula, formulaLabel: EDI_SCORE_FORMULAS[formula], inferred: requestedFormula === "auto" && inferredFormula !== null,
+    total, claimedTotal, validQsos: rows.filter((row) => row.status === "counted").length,
+    duplicates: rows.filter((row) => row.status === "duplicate").length,
+    invalid: rows.filter((row) => row.status === "error" || row.status === "incomplete").length,
+    qsoPoints, newWwls, newExchanges, newDxccs, wwlBonus, exchangeBonus, dxccBonus, bonuses,
+    wwlMultiplier, exchangeMultiplier, dxccMultiplier, multiplierProduct, rows, warnings,
+  };
+}
+
+export function updateEdiScoreHeaders(document: EdiDocument, score: EdiScoreResult): EdiDocument {
+  const bandMultiplier = scoreTriple(document, "CQSOs")[1] || 1;
+  const [, wwlBonusEach] = scoreTriple(document, "CWWLs");
+  const [, exchangeBonusEach] = scoreTriple(document, "CExcs");
+  const [, dxccBonusEach] = scoreTriple(document, "CDXCs");
+  let updated = updateEdiHeader(document, "CQSOs", `${score.validQsos};${bandMultiplier}`);
+  updated = updateEdiHeader(updated, "CQSOP", String(score.qsoPoints));
+  updated = updateEdiHeader(updated, "CWWLs", `${score.newWwls};${wwlBonusEach};${score.wwlMultiplier}`);
+  updated = updateEdiHeader(updated, "CWWLB", String(score.wwlBonus));
+  updated = updateEdiHeader(updated, "CExcs", `${score.newExchanges};${exchangeBonusEach};${score.exchangeMultiplier}`);
+  updated = updateEdiHeader(updated, "CExcB", String(score.exchangeBonus));
+  updated = updateEdiHeader(updated, "CDXCs", `${score.newDxccs};${dxccBonusEach};${score.dxccMultiplier}`);
+  updated = updateEdiHeader(updated, "CDXCB", String(score.dxccBonus));
+  return updateEdiHeader(updated, "CToSc", String(score.total));
 }
 
 function adifTag(name: string, value: string): string {

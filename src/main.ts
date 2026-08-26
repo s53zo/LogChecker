@@ -22,7 +22,7 @@ import { CallsignDatabase } from "./core/callsigns";
 import { geography } from "./core/geography";
 import { adifToCabrillo, cabrilloToAdif, defaultAdifToCabrilloTarget, defaultCabrilloToAdifTarget, documentToCsv, type ConversionResult } from "./core/converter";
 import { decodeLogFile, detectFormat } from "./core/format";
-import { EDI_MODE_NAMES, EDI_QSO_FIELDS, ediField, ediHeader, ediToAdif, ediToCsv, parseEdi, serializeEdi, updateEdiHeader, updateEdiRecord } from "./core/edi";
+import { EDI_MODE_NAMES, EDI_QSO_FIELDS, EDI_SCORE_FORMULAS, calculateEdiScore, ediField, ediHeader, ediToAdif, ediToCsv, parseEdi, serializeEdi, updateEdiHeader, updateEdiRecord, updateEdiScoreHeaders, type EdiScoreFormula } from "./core/edi";
 import { addMinimalCabrilloHeader, applyHeaderTemplate, deleteHeaderTemplate, extractHeaderTemplate, loadHeaderTemplates, removeCabrilloHeader, saveHeaderTemplate } from "./core/header-templates";
 import { bandFromFrequency } from "./core/radio";
 import { paperQsoColumns, validatePaperQso } from "./core/paper";
@@ -99,6 +99,7 @@ interface AppState {
   redo: string[];
   repairs: RepairChange[];
   score: ScoreResult | null;
+  ediScoreFormula: EdiScoreFormula | "auto";
   ruleId: string;
   paperOpen: boolean;
   conversion: { type: "adif" | "cabrillo" | "edi" | "csv"; result: ConversionResult } | null;
@@ -185,6 +186,7 @@ const state: AppState = {
   redo: [],
   repairs: [],
   score: null,
+  ediScoreFormula: "auto",
   ruleId: "generic-prefix",
   paperOpen: false,
   conversion: null,
@@ -389,6 +391,7 @@ function loadSource(source: string, fileName: string, encoding = "UTF-8"): void 
   state.tableUndo = [];
   state.tableRedo = [];
   state.scoreOverrides = {};
+  state.ediScoreFormula = "auto";
   state.view = "open";
   const parsed = parseSource(source, fileName);
   state.ruleId = parsed.format === "cabrillo" ? recommendedRuleId(parsed.contest) : "generic-prefix";
@@ -681,12 +684,34 @@ function convertView(): string {
 
 function scoreView(): string {
   if (!state.document) return emptyView();
+  if (state.document.format === "edi") return ediScoreView(state.document);
   if (state.document.format !== "cabrillo" || !state.score) return `${pageHead("Scoring", "Cabrillo log required", "Convert the current file to Cabrillo to calculate a transparent contest score.")}<div class="status-banner info"><span>i</span><div><strong>Scoring is unavailable for this format.</strong><br />ADIF conversion is available in Export.</div></div>`;
   const score = state.score;
   return `${pageHead("Transparent scoring", score.ruleName, "Choose a fixture-backed rule. Each contact exposes editable points and multiplier inputs.", `<button class="btn" data-action="download-score-csv">Detailed CSV</button><button class="btn" data-action="preview-report">HTML report</button><button class="btn primary" data-action="update-claimed-score">Update CLAIMED-SCORE</button>`)}
     <div class="grid-2"><section class="score-hero"><p class="eyebrow">Calculated score</p><div class="score-total">${score.total.toLocaleString()}</div><div class="score-formula">${escapeHtml(score.formula)} · ${score.duplicates} duplicates removed</div></section>
     <section class="card"><div class="card-head"><h3>Scoring rule</h3></div><div class="card-body stack"><label class="field"><span>Rule</span><select id="score-rule" class="select">${scoringRules.map((rule) => `<option value="${rule.id}" ${rule.id === state.ruleId ? "selected" : ""}>${escapeHtml(rule.name)}</option>`).join("")}</select></label><p class="help-text">${escapeHtml(scoringRules.find((rule) => rule.id === state.ruleId)?.description ?? "")}</p><button class="btn dark" data-action="calculate-score">Recalculate</button></div></section></div>
     <section class="card" style="margin-top:1rem"><div class="card-head"><h3>Contact scoring trace</h3><span class="help-text">${score.qsos} valid contacts · edit then Rescan to restore rule values</span></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>Call</th><th>Band</th><th>Mode</th><th>Country</th><th>Points</th><th>Bonus</th><th>Multiplier</th><th>Status</th><th>Rule</th></tr></thead><tbody>${score.rows.map((row) => `<tr><td>${escapeHtml(row.call)}</td><td>${escapeHtml(row.band)}</td><td>${escapeHtml(row.mode)}</td><td>${escapeHtml(row.country)}</td><td><input class="cell-input" type="number" data-score-id="${escapeHtml(row.qsoId)}" data-score-field="points" value="${row.points}" aria-label="Points for ${escapeHtml(row.call)}" /></td><td>${row.bonusPoints ?? 0}</td><td><input class="cell-input" data-score-id="${escapeHtml(row.qsoId)}" data-score-field="multiplier" value="${escapeHtml(row.multiplier)}" aria-label="Multiplier for ${escapeHtml(row.call)}" /></td><td>${row.duplicate ? "Duplicate" : "Counted"}</td><td><button class="btn ghost" data-action="rescan-score-row" data-score-id="${escapeHtml(row.qsoId)}">Rescan</button></td></tr>`).join("")}</tbody></table></div>${score.notes.map((note) => `<p class="help-text">${escapeHtml(note)}</p>`).join("")}</div></section>`;
+}
+
+function ediScoreView(documentValue: EdiDocument): string {
+  const score = calculateEdiScore(documentValue, state.ediScoreFormula);
+  const claimedMatches = score.claimedTotal !== null && score.claimedTotal === score.total;
+  const statusLabel: Record<(typeof score.rows)[number]["status"], string> = { counted: "Counted", duplicate: "Duplicate", error: "Error record", incomplete: "Incomplete / zero points" };
+  const formulaOptions = (Object.entries(EDI_SCORE_FORMULAS) as Array<[EdiScoreFormula, string]>).map(([value, label]) => `<option value="${value}" ${state.ediScoreFormula === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  return `${pageHead("EDI score recalculation", ediHeader(documentValue, "TName") || "REG1TEST / EDI", "Recalculate declared totals from the file’s per-QSO points and scoring flags.", `<button class="btn primary" data-action="update-edi-score">Update EDI score fields</button>`)}
+    <div class="grid-2"><section class="score-hero"><p class="eyebrow">Calculated score</p><div class="score-total">${score.total.toLocaleString()}</div><div class="score-formula">${escapeHtml(score.formulaLabel)} · ${score.duplicates} duplicate${score.duplicates === 1 ? "" : "s"} excluded</div></section>
+    <section class="card"><div class="card-head"><h3>Total-score formula</h3></div><div class="card-body stack"><label class="field"><span>Formula</span><select id="edi-score-formula" class="select"><option value="auto" ${state.ediScoreFormula === "auto" ? "selected" : ""}>Auto-detect from CToSc</option>${formulaOptions}</select></label><p class="help-text">The EDI standard does not define one universal CToSc formula. Auto-detect compares the claimed score with safe combinations of recorded points, bonuses and multipliers.</p><button class="btn dark" data-action="calculate-edi-score">Recalculate</button></div></section></div>
+    <div class="metric-grid" style="margin-top:1rem">${metric("Valid QSOs", score.validQsos, "positive recorded points")}${metric("QSO points", score.qsoPoints.toLocaleString(), "CQSOP")}${metric("Duplicates", score.duplicates, "D flag excluded")}${metric("Incomplete", score.invalid, "ERROR or zero/missing points")}</div>
+    <section class="card" style="margin-bottom:1rem"><div class="card-head"><h3>Claimed total comparison</h3><span class="help-text">${score.inferred ? "Formula inferred from CToSc" : "Selected/default formula"}</span></div><div class="card-body stack">
+      <div class="status-banner ${claimedMatches ? "success" : "warning"}"><span>${claimedMatches ? "✓" : "!"}</span><div><strong>${score.claimedTotal === null ? "No claimed CToSc is present" : `Claimed ${score.claimedTotal.toLocaleString()} · calculated ${score.total.toLocaleString()}`}</strong><br />${claimedMatches ? "The recalculated total matches the file." : "Review the selected formula before updating the header."}</div></div>
+      ${score.warnings.map((warning) => `<div class="status-banner warning"><span>!</span><div>${escapeHtml(warning)}</div></div>`).join("")}
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>Component</th><th>Count</th><th>Bonus each</th><th>Bonus total</th><th>Multiplier</th></tr></thead><tbody>
+        <tr><td>WWL</td><td>${score.newWwls}</td><td>${score.newWwls ? score.wwlBonus / score.newWwls : 0}</td><td>${score.wwlBonus}</td><td>${score.wwlMultiplier}</td></tr>
+        <tr><td>Exchange</td><td>${score.newExchanges}</td><td>${score.newExchanges ? score.exchangeBonus / score.newExchanges : 0}</td><td>${score.exchangeBonus}</td><td>${score.exchangeMultiplier}</td></tr>
+        <tr><td>DXCC</td><td>${score.newDxccs}</td><td>${score.newDxccs ? score.dxccBonus / score.newDxccs : 0}</td><td>${score.dxccBonus}</td><td>${score.dxccMultiplier}</td></tr>
+      </tbody></table></div>
+    </div></section>
+    <section class="card"><div class="card-head"><h3>Contact scoring trace</h3><span class="help-text">${score.rows.length} records · first ${Math.min(score.rows.length, 1000)} shown</span></div><div class="card-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>Line</th><th>Call</th><th>Recorded points</th><th>Status</th></tr></thead><tbody>${score.rows.slice(0, 1000).map((row) => `<tr><td>${row.lineNumber}</td><td>${escapeHtml(row.call)}</td><td>${row.points}</td><td>${statusLabel[row.status]}</td></tr>`).join("")}</tbody></table></div><p class="help-text">Per-QSO points are authoritative input to this recalculation and are not replaced by an assumed distance formula. Edit them in QSOs when the contest adjudication requires a correction.</p></div></section>`;
 }
 
 function bars(entries: Array<{ label: string; value: number }>): string {
@@ -1252,6 +1277,12 @@ app.addEventListener("click", (event) => {
     case "cancel-adif-merge": state.adifMerge = null; render(); break;
     case "download-callsigns": if (state.document?.format === "adif") download(`${extractAdifCallsigns(state.document).join("\n")}\n`, "txt"); break;
     case "calculate-score": if (state.document?.format === "cabrillo") { state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides); render(); toast("Score recalculated."); } break;
+    case "calculate-edi-score": if (state.document?.format === "edi") { render(); toast("EDI score recalculated from the current records."); } break;
+    case "update-edi-score": if (state.document?.format === "edi") {
+      const score = calculateEdiScore(state.document, state.ediScoreFormula);
+      setDocument(updateEdiScoreHeaders(state.document, score), { toast: `EDI score fields updated to ${score.total.toLocaleString()}. Undo is available.` });
+      break;
+    }
     case "rescan-score-row": if (state.document?.format === "cabrillo" && target.dataset.scoreId) {
       delete state.scoreOverrides[target.dataset.scoreId];
       state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides);
@@ -1379,6 +1410,7 @@ app.addEventListener("change", async (event) => {
     render();
   }
   if (target.id === "score-rule") { state.ruleId = target.value; state.scoreOverrides = {}; if (state.document?.format === "cabrillo") state.score = scoreWithOverrides(state.document, state.ruleId, state.scoreOverrides); render(); }
+  if (target.id === "edi-score-formula") { state.ediScoreFormula = target.value as EdiScoreFormula | "auto"; render(); }
   if (target.id === "station-call") state.stationCall = target.value.toUpperCase();
   if (target.id === "conversion-contest") { state.conversionContest = target.value.toUpperCase(); state.conversion = null; render(); }
   if (target.id === "adif-lowercase" && target instanceof HTMLInputElement) state.adifOptions.tagCase = target.checked ? "lower" : "upper";
