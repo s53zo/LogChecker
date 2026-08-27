@@ -116,6 +116,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .metric-note { margin-top: .2rem; color: var(--ink-soft); font-size: .7rem; }
 .grid-2 { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(16rem, .8fr); gap: 1rem; }
 .stack { display: grid; gap: 1rem; }
+.online-tool-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.online-tool { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .7rem; background: #faf8f2; }
+.online-tool h4 { margin: 0 0 .3rem; }
+.online-tool p { margin: 0; color: var(--ink-soft); }
+.online-tool-action { display: flex; flex: 0 0 auto; align-items: center; gap: .6rem; }
+.compact-status { margin-top: 1rem; }
+.export-notes { margin-top: .8rem; color: var(--ink-soft); }
+.export-notes summary { cursor: pointer; font-weight: 700; color: var(--ink); }
+.export-notes ul { margin-bottom: 0; }
 
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem 1rem; }
 .field-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -195,6 +204,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .nav-button.active { box-shadow: inset 0 -3px var(--orange); }
   .main { padding-top: 1rem; }
   .grid-2 { grid-template-columns: 1fr; }
+  .online-tool-grid { grid-template-columns: 1fr; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
