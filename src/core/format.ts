@@ -11,7 +11,7 @@ export function detectFormat(source: string, fileName = ""): LogFormat {
   if (/<(?:ADIF_VER|EOH|CALL|QSO_DATE|EOR)(?::|>)/i.test(sample)) return "adif";
   if (extension === "edi") return "edi";
   if (extension === "adi" || extension === "adif") return "adif";
-  if (extension === "cbr" || extension === "cab" || extension === "log") return "cabrillo";
+  if (extension === "cbr" || extension === "cab" || (extension === "log" && /^\s*(?:CALLSIGN|CONTEST|END-OF-LOG)\s*:/im.test(sample))) return "cabrillo";
   return "text";
 }
 

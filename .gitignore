@@ -3,6 +3,9 @@ dist/
 test-results/
 playwright-report/
 .DS_Store
+.playwright-cli/
+.omx/state/
+/output/
 
 # Authorized local recovery/reference material; keep it out of the clean-room
 # web application's source repository.
@@ -13,3 +16,14 @@ playwright-report/
 /tests/
 /PLAN.md
 /playwright.config.ts
+
+# Newly authored regression tooling is part of the application, not recovery material.
+!/scripts/
+/scripts/*
+!/scripts/register-ts.mjs
+!/scripts/browser-check.mjs
+!/scripts/check-source.mjs
+!/tests/
+/tests/*
+!/tests/*.test.mjs
+!/tests/fixtures/

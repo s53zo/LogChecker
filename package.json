@@ -7,9 +7,13 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "vitest run tests/unit/core.test.ts",
-    "test:e2e": "playwright test"
+    "test": "node --import ./scripts/register-ts.mjs --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "npm run build && node scripts/browser-check.mjs",
+    "lint": "node scripts/check-source.mjs",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build"
   },
+  "engines": { "node": ">=22.18" },
   "devDependencies": {
     "typescript": "5.9.2",
     "vite": "7.3.6"

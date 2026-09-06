@@ -45,13 +45,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .skip-link { position: fixed; left: 1rem; top: -4rem; z-index: 100; padding: .75rem 1rem; background: white; color: var(--navy); border-radius: .5rem; }
 .skip-link:focus { top: 1rem; }
 
-.app-shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+.app-shell { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1.35rem; color: white; background: var(--navy); border-bottom: 3px solid var(--orange); }
 .brand { display: flex; align-items: center; gap: .8rem; min-width: 0; }
 .brand-mark { display: grid; place-items: center; width: 2.4rem; height: 2.4rem; border: 1px solid rgb(255 255 255 / .25); border-radius: .7rem; color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 800; letter-spacing: -.08em; transform: rotate(-2deg); }
 .brand h1 { margin: 0; font-size: 1rem; letter-spacing: .03em; }
 .brand p { margin: .1rem 0 0; color: #aebcc9; font-size: .75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.top-actions { display: flex; align-items: center; gap: .55rem; }
+.top-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+.topbar { flex-wrap: wrap; min-width: 0; }
 .privacy-chip { display: inline-flex; align-items: center; gap: .42rem; padding: .42rem .68rem; color: #cfe9e7; background: rgb(54 183 180 / .12); border: 1px solid rgb(54 183 180 / .3); border-radius: 999px; font-size: .74rem; }
 .privacy-chip::before { content: ""; width: .45rem; height: .45rem; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 0 4px rgb(54 183 180 / .13); }
 

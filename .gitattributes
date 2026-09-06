@@ -1,0 +1,2 @@
+# Preserve the original logger padding in this regression fixture.
+tests/fixtures/s53zo-20260906.txt whitespace=-blank-at-eol

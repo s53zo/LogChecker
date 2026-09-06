@@ -1,4 +1,10 @@
 import "./styles.css";
+import "./import.css";
+import { detectImport } from "./core/ingestion";
+import { importStructured } from "./core/import-structured";
+import { ImportController } from "./ui/import-controller";
+import { prepareImport } from "./core/import-tasks";
+import type { ImportSession, NormalizedImport } from "./core/ingestion-types";
 import { countBucket, trackEvent } from "./core/analytics";
 import { adifValue, parseAdif, serializeAdif, updateAdifTag } from "./core/adif";
 import { parseAdx, serializeAdx } from "./core/adx";
@@ -259,6 +265,50 @@ const state: AppState = {
 };
 
 const callbook = new CallsignDatabase();
+let importController: ImportController | null = null;
+let importBaseSource: string | null = null;
+let legacyTable = false;
+let pasteOpen = false;
+let pasteDraft = "";
+let sourceImportVersion = 0;
+let sourceImportAbort: AbortController | null = null;
+
+function openImportWorkspace(source: string, fileName = "pasted.txt", prepared?: { session: ImportSession; normalized: NormalizedImport }): void {
+  const session = prepared?.session ?? importStructured(source, fileName) ?? detectImport(source);
+  importController?.dispose();
+  importController = new ImportController(session, () => {
+    // Background mapping must not replace an editor in another view mid-typing.
+    if (state.view === "convert") render();
+  }, download, () => {
+    if (source.length > 250_000) throw new Error("Use the guided mapper for large inputs; the classic character grid is limited to 250,000 characters.");
+    legacyTable = true;
+    if (state.document?.format === "text" && !state.textTable) state.textTable = parseTextTable(state.document.source);
+  }, prepared?.normalized);
+  importBaseSource = source;
+  legacyTable = false;
+}
+
+async function prepareAndUseSource(source: string, fileName: string, encoding = "UTF-8", mode: "load" | "map" | "edit" = "load"): Promise<void> {
+  sourceImportAbort?.abort();
+  const abort = new AbortController(); sourceImportAbort = abort;
+  const version = ++sourceImportVersion;
+  try {
+    const needsMapping = mode !== "load" || detectFormat(source, fileName) === "text";
+    if (source.length > 100_000 && needsMapping) toast("Inspecting this log in the background. Your current work stays available.");
+    const prepared = needsMapping ? await prepareImport(source, mode === "edit" ? undefined : fileName, abort.signal) : undefined;
+    if (version !== sourceImportVersion || abort.signal.aborted) return;
+    if (mode === "load") loadSource(source, fileName, encoding, prepared);
+    else {
+      if (mode === "map" && (!state.document || sourceOf(state.document) !== source)) loadSource(source, fileName, encoding, prepared);
+      else openImportWorkspace(source, fileName, prepared);
+      if (mode === "edit") setDocument(parseSource(source), { toast: "Source changes applied." });
+      pasteOpen = false;
+      state.view = "convert"; render();
+    }
+  } catch (error) {
+    if (!abort.signal.aborted) toast(error instanceof Error ? error.message : "Could not interpret this source. The input remains available for correction.");
+  }
+}
 let masterRequestVersion = 0;
 let ctyRequestVersion = 0;
 
@@ -381,6 +431,18 @@ function diagnosticsFor(documentValue: LogDocument): Diagnostic[] {
 }
 
 function setDocument(documentValue: LogDocument, options: { history?: boolean; toast?: string } = {}): void {
+  const nextSource = sourceOf(documentValue);
+  if (!state.document || sourceOf(state.document) !== nextSource) {
+    // A pending mapper is tied to the editor revision it was prepared from.
+    sourceImportVersion++;
+    sourceImportAbort?.abort();
+  }
+  if (importController && importBaseSource !== nextSource) {
+    importController.dispose();
+    importController = null;
+    importBaseSource = null;
+    legacyTable = false;
+  }
   if (options.history !== false && state.document) {
     state.undo.push(sourceOf(state.document));
     if (state.undo.length > 60) state.undo.shift();
@@ -388,7 +450,10 @@ function setDocument(documentValue: LogDocument, options: { history?: boolean; t
   }
   state.document = documentValue;
   if (documentValue.format === "text") {
-    if (!state.textTable || state.textTable.source !== documentValue.source) state.textTable = parseTextTable(documentValue.source);
+    if (importController?.workspace.session.source !== documentValue.source) {
+      try { openImportWorkspace(documentValue.source); } catch (error) { importController = null; toast(error instanceof Error ? error.message : "Could not interpret this input."); }
+      state.textTable = null;
+    }
   } else {
     state.textTable = null;
   }
@@ -413,7 +478,16 @@ function setDocument(documentValue: LogDocument, options: { history?: boolean; t
   if (options.toast) toast(options.toast);
 }
 
-function loadSource(source: string, fileName: string, encoding = "UTF-8"): void {
+function loadSource(source: string, fileName: string, encoding = "UTF-8", prepared?: { session: ImportSession; normalized: NormalizedImport }): void {
+  // Validate the replacement before clearing the current document or mapper.
+  const parsed = parseSource(source, fileName);
+  pasteOpen = false;
+  sourceImportVersion++;
+  sourceImportAbort?.abort();
+  importController?.dispose();
+  importController = null;
+  importBaseSource = null;
+  legacyTable = false;
   state.fileName = fileName;
   state.encoding = encoding;
   state.undo = [];
@@ -427,15 +501,21 @@ function loadSource(source: string, fileName: string, encoding = "UTF-8"): void 
   state.scoreOverrides = {};
   state.ediScoreFormula = "auto";
   state.view = "open";
-  const parsed = parseSource(source, fileName);
+  if (prepared) {
+    openImportWorkspace(source, fileName, prepared);
+    // ADX serialization may normalize layout while preserving its data.
+    importBaseSource = sourceOf(parsed);
+  }
   state.ruleId = parsed.format === "cabrillo" ? recommendedRuleId(parsed.contest) : "generic-prefix";
   setDocument(parsed, { history: false, toast: `${fileName} opened locally.` });
+  if (parsed.format === "text" && importController) { state.view = "convert"; render(); }
 }
 
 function qsoCount(): number {
   if (!state.document) return 0;
   if (state.document.format === "cabrillo") return state.document.lines.filter((line) => line.qso).length;
   if (state.document.format === "adif" || state.document.format === "edi") return state.document.records.length;
+  if (state.document.format === "text" && importController) return importController.recordCount;
   return 0;
 }
 
@@ -467,10 +547,10 @@ function shell(content: string): string {
       <div class="brand"><div class="brand-mark" aria-hidden="true">QSO</div><div><h1>Amateur Radio Log Workbench</h1><p>Inspect · repair · convert · analyze · score</p></div></div>
       <div class="top-actions">
         <span class="privacy-chip"><span>Private browser processing</span></span>
-        <button class="btn ghost" data-action="undo" ${!(state.undo.length || state.tableUndo.length) ? "disabled" : ""} title="Undo (Ctrl+Z)">Undo</button>
-        <button class="btn ghost" data-action="redo" ${!(state.redo.length || state.tableRedo.length) ? "disabled" : ""} title="Redo (Ctrl+Y)">Redo</button>
+        <button class="btn ghost" data-action="undo" ${!(state.undo.length || state.tableUndo.length || (state.view === "convert" && !legacyTable && importController?.workspace.undoStack.length)) ? "disabled" : ""} title="Undo (Ctrl+Z)">Undo</button>
+        <button class="btn ghost" data-action="redo" ${!(state.redo.length || state.tableRedo.length || (state.view === "convert" && !legacyTable && importController?.workspace.redoStack.length)) ? "disabled" : ""} title="Redo (Ctrl+Y)">Redo</button>
         <button class="btn primary" data-action="choose-file">Open file</button>
-        <input id="file-input" class="hidden" type="file" accept=".log,.cbr,.cab,.adi,.adif,.adx,.edi,.txt,text/plain,application/xml,text/xml" />
+        <input id="file-input" class="hidden" type="file" accept=".log,.cbr,.cab,.adi,.adif,.adx,.edi,.txt,.csv,.tsv,text/plain,text/csv,application/xml,text/xml" />
         <input id="callbook-input" class="hidden" type="file" accept=".dta,.txt,text/plain" />
         <input id="cty-input" class="hidden" type="file" accept=".dat,.txt,text/plain" />
         <input id="adif-merge-input" class="hidden" type="file" accept=".adi,.adif,text/plain" multiple />
@@ -496,17 +576,22 @@ function emptyView(): string {
     <div class="drop-zone card" data-drop-zone>
       <div><div class="drop-icon" aria-hidden="true">QSO:</div><p class="eyebrow">Private browser toolbox</p><h2>Make more of any amateur-radio log.</h2>
       <p>Work with Cabrillo, ADIF, IARU Region 1 EDI, or ordinary text. Inspect contacts, repair malformed records, convert formats, analyze activity, and score supported contests.</p>
-      <div class="button-row" style="justify-content:center"><button class="btn primary" data-action="choose-file">Choose a log</button><button class="btn" data-action="sample">Try a sample</button>${draft ? `<button class="btn ghost" data-action="restore-draft">Restore local draft</button>` : ""}</div>
+      <div class="button-row" style="justify-content:center"><button class="btn primary" data-action="choose-file">Choose a log</button>${pasteLogButton()}<button class="btn" data-action="sample">Try a sample</button>${draft ? `<button class="btn ghost" data-action="restore-draft">Restore local draft</button>` : ""}</div>
       <div class="format-strip"><span class="format-pill">.CBR</span><span class="format-pill">.LOG</span><span class="format-pill">.ADI</span><span class="format-pill">.ADX</span><span class="format-pill">.EDI</span><span class="format-pill">.TXT</span></div></div>
     </div>
     <div class="status-banner info" style="margin-top:1rem"><span>i</span><div><strong>Looking for a dedicated log analyzer?</strong><br />The author recommends <a href="https://s53m.com/SH6" target="_blank" rel="noopener noreferrer" data-analytics="sh6_recommendation">SH6</a>, a free online amateur-radio log analyzer.</div></div>
-    ${onlineImportPanel()}
+    ${pasteImportPanel()}
     ${referenceDataPanel()}
   </section>`;
 }
 
-function onlineImportPanel(): string {
-  return `<section class="card" style="margin-top:1rem" aria-label="Online ADIF import"><div class="card-head"><h3>Online ADIF handoff</h3><span class="format-pill">Browser to browser</span></div><div class="card-body stack"><label><input id="auto-import-adif" type="checkbox" ${state.autoImportAdif ? "checked" : ""} /> Automatically open ADIF sent by trusted S53ZO web tools</label><p class="help-text">Compatible tools can open this page and pass an ADIF directly between browser tabs. The log is carried in memory with <code>postMessage</code>; it is not put in the URL or uploaded to a server.</p></div></section>`;
+function pasteImportPanel(): string {
+  if (!pasteOpen) return "";
+  return `<section id="paste-import-panel" class="card" style="margin-top:1rem"><div class="card-head"><h3>Paste a log or table</h3><span class="format-pill">Automatic field mapping</span></div><div class="card-body stack"><label class="field"><span>Pasted log text</span><textarea id="paste-import-source" class="textarea" spellcheck="false" placeholder="Paste a logger report, spreadsheet rows, or structured log here">${escapeHtml(pasteDraft)}</textarea></label><div class="button-row"><button class="btn primary" data-action="import-paste">Inspect pasted text</button><button class="btn" data-action="toggle-paste">Cancel</button></div><p class="help-text">Review detected columns, repair values, then export ADIF, ADX, Cabrillo, EDI, or CSV. Your source stays on this device.</p></div></section>`;
+}
+
+function pasteLogButton(): string {
+  return `<button class="btn" data-action="toggle-paste" aria-expanded="${pasteOpen}" aria-controls="paste-import-panel">Paste a log</button>`;
 }
 
 function pageHead(eyebrow: string, title: string, subtitle: string, actions = ""): string {
@@ -549,13 +634,12 @@ function openView(): string {
   if (!state.document) return emptyView();
   const errors = state.diagnostics.filter((item) => item.severity === "error").length;
   const warnings = state.diagnostics.filter((item) => item.severity === "warning").length;
-  return `${pageHead("Workspace", state.fileName, "A local, editable working copy. Nothing in this log is transmitted from your browser.", `<button class="btn" data-action="save-draft">Save draft</button><button class="btn danger" data-action="close-log">Close</button>`)}
+  return `${pageHead("Workspace", state.fileName, "A local, editable working copy. Nothing in this log is transmitted from your browser.", `${pasteLogButton()}<button class="btn" data-action="save-draft">Save draft</button><button class="btn danger" data-action="close-log">Close</button>`)}
     <div class="metric-grid">${metric("Contacts", qsoCount(), "parsed QSO records")}${metric("Errors", errors, "must review")}${metric("Warnings", warnings, "format-aware advice")}${metric("Layout", layoutName(), state.document.format === "cabrillo" ? "fixed-column template" : "record format")}</div>
     <div class="grid-2"><div class="stack">${rawEditor()}</div><aside class="stack">
       <section class="card"><div class="card-head"><h3>Readiness</h3></div><div class="card-body"><div class="status-banner ${errors ? "warning" : "success"}"><span>${errors ? "●" : "✓"}</span><div><strong>${escapeHtml(documentStatus())}</strong><br />${errors ? "Open Problems to jump directly to each affected field." : "You can continue to analysis, conversion, scoring, or export."}</div></div></div></section>
-      ${onlineImportPanel()}
       ${callsignAssistance()}
-    </aside></div>`;
+    </aside></div>${pasteImportPanel()}`;
 }
 
 function cabrilloHeaderView(documentValue: CabrilloDocument): string {
@@ -733,6 +817,8 @@ function searchView(): string {
 
 function convertView(): string {
   if (!state.document) return emptyView();
+  if (importController && !legacyTable) return importController.render();
+  if (state.document.format !== "text") return `${pageHead("Convert", "Choose a conversion workflow", "Use guided field mapping for validated exports, or retain the existing structured export tools.")}<section class="card"><div class="card-body button-row"><button class="btn primary" data-action="advanced-import">Map fields and export</button><button class="btn" data-view="export">Existing format export</button></div></section>`;
   if (state.document.format !== "text" || !state.textTable) {
     return `${pageHead("Convert", "Structured format conversion", "Review source and target fields before creating a converted file.")}<section class="card"><div class="card-body"><div class="status-banner info"><span>i</span><div><strong>${state.document.format.toUpperCase()} is already structured.</strong><br />Use Export to preview Cabrillo, ADIF, and CSV output. Unknown source fields are retained where the target format permits it.</div></div><div class="button-row" style="margin-top:1rem"><button class="btn primary" data-view="export">Open export and conversion</button></div></div></section>`;
   }
@@ -977,7 +1063,16 @@ function viewContent(): string {
 }
 
 function render(): void {
+  const importActive = state.view === "convert" && importController && !legacyTable;
+  const expanded = importActive ? [...app.querySelectorAll<HTMLDetailsElement>(".import-workspace details")].map(node => node.open) : [];
+  const focused = importActive && document.activeElement instanceof HTMLElement && document.activeElement.hasAttribute("data-import-field") ? { ...document.activeElement.dataset } : null;
+  const scroll = document.querySelector("#main-content")?.scrollTop ?? 0;
   app.innerHTML = shell(viewContent());
+  if (importActive) {
+    [...app.querySelectorAll<HTMLDetailsElement>(".import-workspace details")].forEach((node, i) => { if (expanded[i] !== undefined) node.open = expanded[i]!; });
+    if (focused) [...app.querySelectorAll<HTMLElement>("[data-import-field]")].find(node => node.dataset.importField === focused.importField && node.dataset.importIndex === focused.importIndex && node.dataset.importValue === focused.importValue)?.focus({ preventScroll: true });
+    const main = document.querySelector("#main-content"); if (main) main.scrollTop = scroll;
+  }
   if (state.selectedId && state.view === "qsos") {
     requestAnimationFrame(() => document.getElementById(`row-${state.selectedId}`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
   }
@@ -1017,7 +1112,7 @@ function downloadNamed(content: string, fileName: string): void {
 async function openFile(file: File): Promise<void> {
   try {
     const decoded = decodeLogFile(await file.arrayBuffer());
-    loadSource(decoded.text, file.name, decoded.encoding);
+    await prepareAndUseSource(decoded.text, file.name, decoded.encoding);
     trackEvent("file_open", { document_format: state.document?.format ?? "text", record_bucket: countBucket(qsoCount()), result: decoded.warning ? "warning" : "success", source_type: "local_file" });
     if (decoded.warning) toast(decoded.warning);
   } catch {
@@ -1027,6 +1122,7 @@ async function openFile(file: File): Promise<void> {
 }
 
 function undo(): void {
+  if (state.view === "convert" && importController && !legacyTable) { importController.undo(); return; }
   if (state.view === "convert" && state.textTable && state.tableUndo.length) {
     state.tableRedo.push(state.textTable);
     state.textTable = state.tableUndo.pop()!;
@@ -1042,6 +1138,7 @@ function undo(): void {
 }
 
 function redo(): void {
+  if (state.view === "convert" && importController && !legacyTable) { importController.redo(); return; }
   if (state.view === "convert" && state.textTable && state.tableRedo.length) {
     state.tableUndo.push(state.textTable);
     state.textTable = state.tableRedo.pop()!;
@@ -1217,6 +1314,8 @@ function navigateInvalid(direction: "forward" | "backward"): void {
 }
 
 app.addEventListener("click", (event) => {
+  const importTarget = (event.target as HTMLElement).closest<HTMLElement>("[data-import-action]");
+  if (importTarget && importController?.click(importTarget)) return;
   const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action], [data-view], [data-diagnostic-id], [data-preflight-diagnostic], [data-search-line], [data-search-offset], [data-table-operation], [data-analytics]");
   if (!target) return;
   const documentFormat = state.document?.format ?? "none";
@@ -1263,6 +1362,26 @@ app.addEventListener("click", (event) => {
     return;
   }
   switch (target.dataset.action) {
+    case "toggle-paste":
+      pasteOpen = !pasteOpen;
+      render();
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLTextAreaElement>("#paste-import-source");
+        if (pasteOpen && input) { input.scrollIntoView({block:"center"}); input.focus({preventScroll:true}); }
+        else document.querySelector<HTMLButtonElement>('[data-action="toggle-paste"]')?.focus();
+      });
+      break;
+    case "import-paste": {
+      const source = document.querySelector<HTMLTextAreaElement>("#paste-import-source")?.value ?? "";
+      if (!source.trim()) { toast("Paste some log text first."); break; }
+      void prepareAndUseSource(source, "pasted.txt", "UTF-8", "map");
+      break;
+    }
+    case "advanced-import": {
+      if (!state.document) break;
+      void prepareAndUseSource(sourceOf(state.document), state.fileName, state.encoding, "map");
+      break;
+    }
     case "choose-file": document.querySelector<HTMLInputElement>("#file-input")?.click(); break;
     case "open-qsl-printing": openQslPrinting(); break;
     case "choose-callbook": document.querySelector<HTMLInputElement>("#callbook-input")?.click(); break;
@@ -1341,12 +1460,20 @@ app.addEventListener("click", (event) => {
       break;
     }
     case "sample": loadSource(SAMPLE, "sample-cq-wpx.log", "UTF-8"); break;
-    case "restore-draft": { const draft = loadDraft(); if (draft) loadSource(draft.source, draft.fileName, "Local draft"); break; }
+    case "restore-draft": { const draft = loadDraft(); if (draft) void prepareAndUseSource(draft.source, draft.fileName, "Local draft"); break; }
     case "save-draft": if (state.document) { saveDraft({ fileName: state.fileName, source: sourceOf(state.document), savedAt: new Date().toISOString() }); toast("Draft saved in this browser."); } break;
-    case "close-log": state.document = null; state.fileName = "No log open"; state.diagnostics = []; state.undo = []; state.redo = []; state.view = "open"; render(); break;
+    case "close-log": sourceImportVersion++; sourceImportAbort?.abort(); importController?.dispose(); importController = null; state.document = null; state.fileName = "No log open"; state.diagnostics = []; state.undo = []; state.redo = []; state.view = "open"; render(); break;
     case "undo": undo(); break;
     case "redo": redo(); break;
-    case "apply-raw": { const raw = document.querySelector<HTMLTextAreaElement>("#raw-source"); if (raw) setDocument(parseSource(raw.value), { toast: "Source changes applied." }); break; }
+    case "apply-raw": {
+      const raw = document.querySelector<HTMLTextAreaElement>("#raw-source");
+      if (raw) {
+        if (detectFormat(raw.value) === "text") void prepareAndUseSource(raw.value, state.fileName, state.encoding, "edit");
+        else try { setDocument(parseSource(raw.value), { toast: "Source changes applied." }); }
+        catch (error) { toast(error instanceof Error ? error.message : "The source is malformed; your working log has not been replaced."); }
+      }
+      break;
+    }
     case "download-original": if (state.document) download(sourceOf(state.document), state.document.format === "adif" ? state.document.container : state.document.format === "cabrillo" ? "log" : state.document.format === "edi" ? "edi" : "txt"); break;
     case "toggle-nonprinting": state.showNonprinting = !state.showNonprinting; render(); break;
     case "goto-position": if (state.document) {
@@ -1553,6 +1680,7 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", async (event) => {
   const target = event.target as HTMLInputElement | HTMLSelectElement;
+  if (importController?.change(target)) return;
   const editedArea = target.dataset.headerKey || target.dataset.ediHeaderKey ? "header"
     : target.dataset.qsoId || target.dataset.qtcId || target.dataset.adifId || target.dataset.ediId ? "contact"
       : target.dataset.scoreId ? "score" : target.dataset.conversionMap || target.dataset.columnName !== undefined ? "mapping" : "settings";
@@ -1605,12 +1733,6 @@ app.addEventListener("change", async (event) => {
     }
   }
   if (target.id === "file-input" && target instanceof HTMLInputElement && target.files?.[0]) await openFile(target.files[0]);
-  if (target.id === "auto-import-adif" && target instanceof HTMLInputElement) {
-    state.autoImportAdif = target.checked;
-    localStorage.setItem("log-workbench:auto-import-adif:v1", String(target.checked));
-    trackEvent("online_adif_import_setting", { enabled: target.checked });
-    toast(target.checked ? "Trusted online ADIF handoff enabled." : "Online ADIF handoff disabled.");
-  }
   if (target.id === "profile-import-input" && target instanceof HTMLInputElement && target.files?.[0]) { try { const store = parseProfileStore(await target.files[0].text()); state.stationProfiles = store.profiles; state.activeProfileId = store.profiles[0]?.id ?? ""; localStorage.setItem("log-workbench:station-profiles:v1", JSON.stringify(store)); render(); toast(`${store.profiles.length} station profile${store.profiles.length === 1 ? "" : "s"} imported locally.`); } catch (error) { toast(error instanceof Error ? error.message : String(error)); } }
   if (target.id === "callbook-input" && target instanceof HTMLInputElement && target.files?.[0]) {
     masterRequestVersion += 1;
@@ -1699,6 +1821,8 @@ app.addEventListener("submit", (event) => {
 
 app.addEventListener("input", (event) => {
   const target = event.target as HTMLElement;
+  if (target.id === "paste-import-source" && target instanceof HTMLTextAreaElement) { pasteDraft = target.value; return; }
+  if (target instanceof HTMLInputElement && importController?.input(target)) return;
   if (target.id === "fast-entry-source" && target instanceof HTMLTextAreaElement) { state.fastEntrySource = target.value; localStorage.setItem("log-workbench:fast-entry-draft:v1", target.value); }
   const form = target.closest<HTMLFormElement>("#paper-form");
   if (form && (target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) validatePaperForm(form);
